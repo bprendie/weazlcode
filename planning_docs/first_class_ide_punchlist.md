@@ -94,7 +94,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add diff viewer with file list and hunks.
 - [ ] Add tool-call approval modal.
 - [x] Add task progress indicator.
-- [ ] Add recent command output panel.
+- [x] Add recent command output panel.
 - [ ] Add fuzzy file picker.
 - [ ] Add file preview pane.
 - [ ] Add status badges for dirty repo, current branch, active role, and context usage.

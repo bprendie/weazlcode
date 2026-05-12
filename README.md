@@ -106,7 +106,7 @@ Run setup first if you want the guided config flow:
 ## Keys
 
 - `enter`: send message / select session
-- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
+- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
 - `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/worker-patch`, `/reviewer-input`, and `/review` inspect or advance the latest plan
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history

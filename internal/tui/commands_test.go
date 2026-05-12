@@ -63,7 +63,7 @@ func TestSlashModelsCommand(t *testing.T) {
 
 func TestSlashDurableIDEViews(t *testing.T) {
 	m := commandTestModel(t)
-	for _, command := range []string{"/tools", "/config"} {
+	for _, command := range []string{"/tools", "/config", "/outputs"} {
 		updated, _, handled := m.handleSlashCommand(command)
 		if !handled {
 			t.Fatalf("%s handled = false, want true", command)
