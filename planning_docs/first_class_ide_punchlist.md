@@ -1,5 +1,7 @@
 # WeazlCode First-Class IDE Punchlist
 
+North star: frontier models plan/review; local models execute bounded task packets. Keep `planning_docs/north_star_architecture.md` aligned with this punchlist.
+
 ## Direction
 
 WeazlCode should become a first-class terminal IDE for AI-assisted coding, not just a chat app with file tools. The first production workflow should use one worker at a time:
