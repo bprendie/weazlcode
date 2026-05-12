@@ -94,6 +94,45 @@ func TestTaskEventsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPlanAndTaskStatusUpdates(t *testing.T) {
+	store := testPlanStore(t)
+	if err := store.CreateSession("s1", "title", "provider", "model"); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	plan := coding.Plan{
+		ID:        "plan-1",
+		SessionID: "s1",
+		Title:     "Plan",
+		Status:    coding.PlanStatusDraft,
+		Tasks: []coding.Task{{
+			ID:     "task-1",
+			PlanID: "plan-1",
+			Title:  "Task",
+			Goal:   "Do work",
+			Status: coding.TaskStatusPending,
+		}},
+	}
+	if err := store.SavePlan(plan); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	if err := store.UpdatePlanStatus("plan-1", coding.PlanStatusApproved); err != nil {
+		t.Fatalf("UpdatePlanStatus: %v", err)
+	}
+	if err := store.UpdateTaskStatus("task-1", coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	got, ok, err := store.LatestPlan("s1")
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || got.Status != coding.PlanStatusApproved || got.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("plan = %#v ok=%v", got, ok)
+	}
+	if err := store.UpdatePlanStatus("plan-1", "wat"); err == nil {
+		t.Fatal("UpdatePlanStatus accepted bad status")
+	}
+}
+
 func testPlanStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite3"))

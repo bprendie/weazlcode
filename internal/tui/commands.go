@@ -50,6 +50,10 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "packet":
 		m.addSystemNote(m.packetCommandText())
 		m.status = "task packet"
+	case "approve":
+		return m.approveLatestPlan()
+	case "reject":
+		return m.rejectLatestPlan(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -120,6 +124,8 @@ func slashHelp() string {
 		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
 		"/packet - show local-worker packet for the first pending task",
+		"/approve - approve the latest draft plan",
+		"/reject [reason] - block the latest plan",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -128,6 +134,70 @@ func slashHelp() string {
 		"/copy - release mouse for terminal selection",
 		"/mouse - restore mouse scrolling",
 	}, "\n")
+}
+
+func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Approve error: " + err.Error())
+		m.status = "approve failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan to approve. Use `/plan draft <title>` or `/plan import <json>` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if plan.Status != coding.PlanStatusDraft {
+		m.addSystemNote(fmt.Sprintf("Plan %s is %s, not draft.", plan.Title, plan.Status))
+		m.status = "plan not draft"
+		return m, nil, true
+	}
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
+		m.addSystemNote("Approve error: " + err.Error())
+		m.status = "approve failed"
+		return m, nil, true
+	}
+	for _, task := range plan.Tasks {
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "approval",
+			Message: "Plan approved by user; task is eligible for worker packet generation.",
+		})
+	}
+	plan.Status = coding.PlanStatusApproved
+	m.addSystemNote(renderPlan(plan))
+	m.status = "plan approved"
+	return m, nil, true
+}
+
+func (m model) rejectLatestPlan(reason string) (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Reject error: " + err.Error())
+		m.status = "reject failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan to reject.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if reason == "" {
+		reason = "Plan rejected by user."
+	}
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusBlocked); err != nil {
+		m.addSystemNote("Reject error: " + err.Error())
+		m.status = "reject failed"
+		return m, nil, true
+	}
+	for _, task := range plan.Tasks {
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: task.ID, Type: "rejection", Message: reason})
+	}
+	plan.Status = coding.PlanStatusBlocked
+	m.addSystemNote(renderPlan(plan) + "\n\nRejection: " + reason)
+	m.status = "plan rejected"
+	return m, nil, true
 }
 
 func (m model) packetCommandText() string {

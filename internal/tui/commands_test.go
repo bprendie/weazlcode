@@ -125,6 +125,68 @@ func TestSlashPlanImportCommand(t *testing.T) {
 	}
 }
 
+func TestSlashApproveCommand(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Approve me")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	got := updated.(model)
+	if got.status != "plan approved" {
+		t.Fatalf("status = %q, want plan approved", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Status != "approved" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "approval" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSlashRejectCommand(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Reject me")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/reject needs better scoping")
+	if !handled {
+		t.Fatal("reject handled = false")
+	}
+	got := updated.(model)
+	if got.status != "plan rejected" {
+		t.Fatalf("status = %q, want plan rejected", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Status != "blocked" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "rejection" || !strings.Contains(events[0].Message, "better scoping") {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()

@@ -70,7 +70,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Store plans and tasks in SQLite.
 - [x] Add plan status values: `draft`, `approved`, `running`, `blocked`, `done`, plus task `reviewing`.
 - [x] Add local `/plan` and `/tasks` commands in the TUI.
-- [ ] Add user approval before the first worker task runs.
+- [x] Add user approval before the first worker task runs.
 - [x] Add task event history for model runs, tool calls, file edits, and checks.
 
 ## Milestone 5: Single-Worker Loop

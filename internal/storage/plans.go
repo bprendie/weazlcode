@@ -110,6 +110,22 @@ func (s *Store) Tasks(planID string) ([]coding.Task, error) {
 	return tasks, rows.Err()
 }
 
+func (s *Store) UpdatePlanStatus(planID, status string) error {
+	if !coding.ValidPlanStatus(status) {
+		return codingStatusError("plan", status)
+	}
+	_, err := s.db.Exec(`update plans set status = ?, updated_at = current_timestamp where id = ?`, status, planID)
+	return err
+}
+
+func (s *Store) UpdateTaskStatus(taskID, status string) error {
+	if !coding.ValidTaskStatus(status) {
+		return codingStatusError("task", status)
+	}
+	_, err := s.db.Exec(`update tasks set status = ?, updated_at = current_timestamp where id = ?`, status, taskID)
+	return err
+}
+
 func (s *Store) AddTaskEvent(event coding.TaskEvent) (int64, error) {
 	payload := string(event.Payload)
 	res, err := s.db.Exec(
@@ -120,6 +136,19 @@ func (s *Store) AddTaskEvent(event coding.TaskEvent) (int64, error) {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func codingStatusError(kind, status string) error {
+	return &statusError{kind: kind, status: status}
+}
+
+type statusError struct {
+	kind   string
+	status string
+}
+
+func (e *statusError) Error() string {
+	return "invalid " + e.kind + " status " + e.status
 }
 
 func (s *Store) TaskEvents(taskID string) ([]coding.TaskEvent, error) {

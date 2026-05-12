@@ -127,6 +127,10 @@ func ValidateReviewVerdict(verdict ReviewVerdict) error {
 }
 
 func validPlanStatus(status string) bool {
+	return ValidPlanStatus(status)
+}
+
+func ValidPlanStatus(status string) bool {
 	switch status {
 	case PlanStatusDraft, PlanStatusApproved, PlanStatusRunning, PlanStatusBlocked, PlanStatusDone:
 		return true
@@ -136,6 +140,10 @@ func validPlanStatus(status string) bool {
 }
 
 func validTaskStatus(status string) bool {
+	return ValidTaskStatus(status)
+}
+
+func ValidTaskStatus(status string) bool {
 	switch status {
 	case TaskStatusPending, TaskStatusRunning, TaskStatusReviewing, TaskStatusBlocked, TaskStatusDone:
 		return true
