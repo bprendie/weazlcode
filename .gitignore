@@ -1,0 +1,9 @@
+/.gocache/
+/.gomodcache/
+/.weazlcode/
+/weazlchat
+/weazlcode
+/weazlcode-setup
+*.exe
+*.test
+*.out
