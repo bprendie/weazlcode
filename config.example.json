@@ -14,6 +14,12 @@
       "context_window": 32768
     }
   },
+  "model_roles": {
+    "orchestrator": "local-vllm",
+    "worker": "local-ollama",
+    "reviewer": "local-vllm",
+    "summarizer": "local-ollama"
+  },
   "database": {
     "path": "/home/user/.local/share/weazlcode/weazlcode.sqlite3"
   },

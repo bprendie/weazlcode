@@ -12,9 +12,17 @@ const appName = "weazlcode"
 type Config struct {
 	ActiveProvider string              `json:"active_provider"`
 	Providers      map[string]Provider `json:"providers"`
+	ModelRoles     ModelRoles          `json:"model_roles"`
 	Database       Database            `json:"database"`
 	UI             UI                  `json:"ui"`
 	Tools          Tools               `json:"tools"`
+}
+
+type ModelRoles struct {
+	Orchestrator string `json:"orchestrator,omitempty"`
+	Worker       string `json:"worker,omitempty"`
+	Reviewer     string `json:"reviewer,omitempty"`
+	Summarizer   string `json:"summarizer,omitempty"`
 }
 
 type Provider struct {
@@ -105,6 +113,12 @@ func Default() Config {
 			},
 		},
 		Database: Database{Path: filepath.Join(dataDir, "weazlcode.sqlite3")},
+		ModelRoles: ModelRoles{
+			Orchestrator: "local-vllm",
+			Worker:       "local-ollama",
+			Reviewer:     "local-vllm",
+			Summarizer:   "local-ollama",
+		},
 		UI: UI{
 			ResumeLastSession: true,
 			RenderMarkdown:    boolPtr(true),
@@ -138,6 +152,18 @@ func (c *Config) withDefaults() {
 	if c.Providers == nil || len(c.Providers) == 0 {
 		c.Providers = def.Providers
 	}
+	if c.ModelRoles.Orchestrator == "" {
+		c.ModelRoles.Orchestrator = c.ActiveProvider
+	}
+	if c.ModelRoles.Worker == "" {
+		c.ModelRoles.Worker = c.ActiveProvider
+	}
+	if c.ModelRoles.Reviewer == "" {
+		c.ModelRoles.Reviewer = c.ModelRoles.Orchestrator
+	}
+	if c.ModelRoles.Summarizer == "" {
+		c.ModelRoles.Summarizer = c.ModelRoles.Worker
+	}
 	for name, provider := range c.Providers {
 		if provider.ContextWindow <= 0 {
 			provider.ContextWindow = 32768
@@ -159,6 +185,24 @@ func (c *Config) withDefaults() {
 	if c.Tools.MaxFileBytes <= 0 {
 		c.Tools.MaxFileBytes = def.Tools.MaxFileBytes
 	}
+}
+
+func (c *Config) ProviderForRole(role string) Provider {
+	name := c.ActiveProvider
+	switch role {
+	case "orchestrator":
+		name = c.ModelRoles.Orchestrator
+	case "worker":
+		name = c.ModelRoles.Worker
+	case "reviewer":
+		name = c.ModelRoles.Reviewer
+	case "summarizer":
+		name = c.ModelRoles.Summarizer
+	}
+	if p, ok := c.Providers[name]; ok {
+		return p
+	}
+	return c.Active()
 }
 
 func (ui UI) MarkdownEnabled() bool {

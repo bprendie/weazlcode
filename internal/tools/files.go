@@ -11,20 +11,28 @@ import (
 
 type ListFilesTool struct{ limits Limits }
 type ReadFileTool struct{ limits Limits }
+type ReadFileRangeTool struct{ limits Limits }
 type SearchFilesTool struct{ limits Limits }
 type CreateFileTool struct{ limits Limits }
 
-func NewListFilesTool(limits Limits) *ListFilesTool     { return &ListFilesTool{limits: limits} }
-func NewReadFileTool(limits Limits) *ReadFileTool       { return &ReadFileTool{limits: limits} }
+func NewListFilesTool(limits Limits) *ListFilesTool { return &ListFilesTool{limits: limits} }
+func NewReadFileTool(limits Limits) *ReadFileTool   { return &ReadFileTool{limits: limits} }
+func NewReadFileRangeTool(limits Limits) *ReadFileRangeTool {
+	return &ReadFileRangeTool{limits: limits}
+}
 func NewSearchFilesTool(limits Limits) *SearchFilesTool { return &SearchFilesTool{limits: limits} }
 func NewCreateFileTool(limits Limits) *CreateFileTool   { return &CreateFileTool{limits: limits} }
 
-func (t *ListFilesTool) Name() string               { return "list_files" }
-func (t *ReadFileTool) Name() string                { return "read_file" }
-func (t *SearchFilesTool) Name() string             { return "search_files" }
-func (t *CreateFileTool) Name() string              { return "create_file" }
-func (t *ListFilesTool) SafetyLevel() SafetyLevel   { return SafetyLevelSafe }
-func (t *ReadFileTool) SafetyLevel() SafetyLevel    { return SafetyLevelSafe }
+func (t *ListFilesTool) Name() string             { return "list_files" }
+func (t *ReadFileTool) Name() string              { return "read_file" }
+func (t *ReadFileRangeTool) Name() string         { return "read_file_range" }
+func (t *SearchFilesTool) Name() string           { return "search_files" }
+func (t *CreateFileTool) Name() string            { return "create_file" }
+func (t *ListFilesTool) SafetyLevel() SafetyLevel { return SafetyLevelSafe }
+func (t *ReadFileTool) SafetyLevel() SafetyLevel  { return SafetyLevelSafe }
+func (t *ReadFileRangeTool) SafetyLevel() SafetyLevel {
+	return SafetyLevelSafe
+}
 func (t *SearchFilesTool) SafetyLevel() SafetyLevel { return SafetyLevelSafe }
 func (t *CreateFileTool) SafetyLevel() SafetyLevel  { return SafetyLevelSafe }
 
@@ -34,6 +42,10 @@ func (t *ListFilesTool) Description() string {
 
 func (t *ReadFileTool) Description() string {
 	return "Read a text file under a configured workspace root"
+}
+
+func (t *ReadFileRangeTool) Description() string {
+	return "Read a line range from a text file under a configured workspace root"
 }
 
 func (t *SearchFilesTool) Description() string {
@@ -56,6 +68,14 @@ func (t *ReadFileTool) Parameters() []Parameter {
 	return []Parameter{
 		{Name: "path", Type: "string", Description: "File path under a configured workspace root", Required: true},
 		{Name: "max_chars", Type: "number", Description: "Maximum characters to return", Required: false},
+	}
+}
+
+func (t *ReadFileRangeTool) Parameters() []Parameter {
+	return []Parameter{
+		{Name: "path", Type: "string", Description: "File path under a configured workspace root", Required: true},
+		{Name: "start_line", Type: "number", Description: "First 1-based line to return", Required: true},
+		{Name: "line_count", Type: "number", Description: "Number of lines to return, defaults to 120", Required: false},
 	}
 }
 
@@ -156,6 +176,46 @@ func (t *ReadFileTool) Execute(ctx context.Context, params map[string]any) (stri
 		text = text[:maxChars] + fmt.Sprintf("\n\n[truncated: %d chars omitted]", len(string(data))-maxChars)
 	}
 	return text, nil
+}
+
+func (t *ReadFileRangeTool) Execute(ctx context.Context, params map[string]any) (string, error) {
+	if err := t.limits.RequireRoots(); err != nil {
+		return "", err
+	}
+	pathParam, _ := params["path"].(string)
+	path, err := t.limits.ResolveAllowed(pathParam)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", pathParam)
+	}
+	if info.Size() > t.limits.fileLimit() {
+		return "", fmt.Errorf("%s is too large: %d bytes", pathParam, info.Size())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	if !looksText(data) {
+		return "", fmt.Errorf("%s does not look like a text file", pathParam)
+	}
+	start := intParam(params, "start_line", 1, 1, 1_000_000)
+	count := intParam(params, "line_count", 120, 1, 500)
+	lines := strings.Split(string(data), "\n")
+	if start > len(lines) {
+		return "No lines found in requested range.", nil
+	}
+	end := min(len(lines), start+count-1)
+	var out strings.Builder
+	for i := start; i <= end; i++ {
+		fmt.Fprintf(&out, "%d: %s\n", i, lines[i-1])
+	}
+	return t.limits.Truncate(out.String()), nil
 }
 
 func (t *SearchFilesTool) Execute(ctx context.Context, params map[string]any) (string, error) {

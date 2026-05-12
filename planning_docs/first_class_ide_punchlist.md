@@ -39,22 +39,22 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 2: Coding Tools
 
-- [ ] Add `git_status` tool.
-- [ ] Add `git_diff` tool.
-- [ ] Add `git_log` tool.
-- [ ] Add `git_show` tool for commit/file inspection.
-- [ ] Add `apply_patch` tool with workspace-root restrictions.
-- [ ] Add `read_file_range` tool for targeted context.
-- [ ] Add `list_changed_files` tool.
+- [x] Add `git_status` tool.
+- [x] Add `git_diff` tool.
+- [x] Add `git_log` tool.
+- [x] Add `git_show` tool for commit/file inspection.
+- [x] Add `apply_patch` tool with workspace-root restrictions.
+- [x] Add `read_file_range` tool for targeted context.
+- [x] Add `list_changed_files` tool.
 - [ ] Split command execution into `run_readonly_command` and `run_verification_command`.
 - [ ] Add command policy presets for Go, Node, Python, Rust, and shell projects.
 - [ ] Log every coding tool call under `.weazlcode/logs/`.
 
 ## Milestone 3: Model Roles
 
-- [ ] Extend config with model roles: `orchestrator`, `worker`, `reviewer`, `summarizer`.
-- [ ] Preserve existing `active_provider` behavior as a compatibility default.
-- [ ] Add role-to-provider resolution in `internal/llm`.
+- [x] Extend config with model roles: `orchestrator`, `worker`, `reviewer`, `summarizer`.
+- [x] Preserve existing `active_provider` behavior as a compatibility default.
+- [x] Add role-to-provider resolution in config.
 - [ ] Let setup configure local worker first.
 - [ ] Let config manually point orchestrator/reviewer to API-compatible frontier endpoints.
 - [ ] Add role labels to status output and model run logs.

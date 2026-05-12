@@ -217,9 +217,11 @@ Configuration options:
 
 #### Local Workspace
 
-Workspace tools only operate under configured `workspace_roots`.
+Workspace tools operate under configured `workspace_roots`; WeazlCode also adds the detected project root automatically at startup.
 
-- Local files: `list_files`, `search_files`, `read_file`, `create_file`.
+- Local files: `list_files`, `search_files`, `read_file`, `read_file_range`, `create_file`.
+- Git inspection: `git_status`, `git_diff`, `git_log`, `git_show`, `list_changed_files`.
+- Patch editing: `apply_patch` applies unified diffs after validating affected paths against workspace roots.
 - Read-only command: runs a tight allowlist of read-only commands such as `pwd`, `ls`, `find`, `rg`, `cat`, `git status`, `git diff`, `git log`, `git show`, `go test`, and `npm test`. Commands are passed safely as args, never as raw shell strings.
 - SQLite query: executes read-only queries against local database files. Allowed SQL starts with `SELECT`, `WITH`, `EXPLAIN`, or `PRAGMA table_info`.
 - Local memory: encrypted local memory storage with `remember`, `recall`, `list_memories`, and `forget`.
