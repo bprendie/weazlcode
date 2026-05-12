@@ -46,9 +46,9 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add `apply_patch` tool with workspace-root restrictions.
 - [x] Add `read_file_range` tool for targeted context.
 - [x] Add `list_changed_files` tool.
-- [ ] Split command execution into `run_readonly_command` and `run_verification_command`.
-- [ ] Add command policy presets for Go, Node, Python, Rust, and shell projects.
-- [ ] Log every coding tool call under `.weazlcode/logs/`.
+- [x] Split command execution into `run_readonly_command` and `run_verification_command`.
+- [x] Add command policy presets for Go, Node, Python, Rust, and shell projects.
+- [x] Log every coding tool call under `.weazlcode/logs/`.
 
 ## Milestone 3: Model Roles
 

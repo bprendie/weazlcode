@@ -223,11 +223,13 @@ Workspace tools operate under configured `workspace_roots`; WeazlCode also adds 
 - Local files: `list_files`, `search_files`, `read_file`, `read_file_range`, `create_file`.
 - Git inspection: `git_status`, `git_diff`, `git_log`, `git_show`, `list_changed_files`.
 - Patch editing: `apply_patch` applies unified diffs after validating affected paths against workspace roots.
-- Read-only command: runs a tight allowlist of read-only commands such as `pwd`, `ls`, `find`, `rg`, `cat`, `git status`, `git diff`, `git log`, `git show`, `go test`, and `npm test`. Commands are passed safely as args, never as raw shell strings.
+- Read-only command: `run_readonly_command` runs a tight allowlist of inspection commands such as `pwd`, `ls`, `find`, `rg`, `cat`, and read-only `git` subcommands. Commands are passed safely as args, never as raw shell strings.
+- Verification command: `run_verification_command` runs approved test/build/lint checks for Go, Node, Python, Rust, shell, and Make projects. It requires prompt-level approval.
 - SQLite query: executes read-only queries against local database files. Allowed SQL starts with `SELECT`, `WITH`, `EXPLAIN`, or `PRAGMA table_info`.
 - Local memory: encrypted local memory storage with `remember`, `recall`, `list_memories`, and `forget`.
 
 `create_file` only creates new text files under `workspace_roots`; it flat out refuses to overwrite existing files.
+Tool calls are logged as JSONL under `.weazlcode/logs/tool_calls.jsonl` for project-local auditability.
 
 ### How It Works
 

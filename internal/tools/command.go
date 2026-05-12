@@ -11,20 +11,56 @@ import (
 
 type RunCommandTool struct {
 	limits Limits
+	mode   commandMode
 }
 
 func NewRunCommandTool(limits Limits) *RunCommandTool {
-	return &RunCommandTool{limits: limits}
+	return &RunCommandTool{limits: limits, mode: commandModeReadOnly}
 }
 
-func (t *RunCommandTool) Name() string { return "run_command" }
+func NewRunReadOnlyCommandTool(limits Limits) *RunCommandTool {
+	return &RunCommandTool{limits: limits, mode: commandModeReadOnly}
+}
+
+func NewRunVerificationCommandTool(limits Limits) *RunCommandTool {
+	return &RunCommandTool{limits: limits, mode: commandModeVerification}
+}
+
+type commandMode int
+
+const (
+	commandModeReadOnly commandMode = iota
+	commandModeVerification
+)
+
+func (t *RunCommandTool) Name() string {
+	if t.mode == commandModeVerification {
+		return "run_verification_command"
+	}
+	if t.mode == commandModeReadOnly {
+		return "run_readonly_command"
+	}
+	return "run_command"
+}
 func (t *RunCommandTool) Description() string {
+	if t.mode == commandModeVerification {
+		return "Run an allowlisted verification command such as tests, build, vet, or lint under a configured workspace root. Pass command and args separately; shell syntax is not supported"
+	}
 	return "Run a read-only allowlisted command under a configured workspace root. Pass command and args separately; shell syntax is not supported"
 }
-func (t *RunCommandTool) SafetyLevel() SafetyLevel { return SafetyLevelSafe }
+func (t *RunCommandTool) SafetyLevel() SafetyLevel {
+	if t.mode == commandModeVerification {
+		return SafetyLevelPrompt
+	}
+	return SafetyLevelSafe
+}
 func (t *RunCommandTool) Parameters() []Parameter {
+	desc := "Allowlisted read-only command: pwd, ls, find, rg, cat, git"
+	if t.mode == commandModeVerification {
+		desc = "Allowlisted verification command: go, npm, python, pytest, cargo, shellcheck, make"
+	}
 	return []Parameter{
-		{Name: "command", Type: "string", Description: "Allowlisted command: pwd, ls, find, rg, cat, git, go, npm", Required: true},
+		{Name: "command", Type: "string", Description: desc, Required: true},
 		{Name: "args", Type: "array", Description: "Command arguments as an array of strings", Required: false},
 		{Name: "cwd", Type: "string", Description: "Working directory under a configured workspace root", Required: true},
 	}
@@ -43,7 +79,7 @@ func (t *RunCommandTool) Execute(ctx context.Context, params map[string]any) (st
 	if err != nil {
 		return "", err
 	}
-	if err := validateReadOnlyCommand(name, args); err != nil {
+	if err := validateCommand(t.mode, name, args); err != nil {
 		return "", err
 	}
 	cwdParam, _ := params["cwd"].(string)
@@ -87,7 +123,14 @@ func stringSliceParam(v any) ([]string, error) {
 }
 
 func validateReadOnlyCommand(name string, args []string) error {
+	return validateCommand(commandModeReadOnly, name, args)
+}
+
+func validateCommand(mode commandMode, name string, args []string) error {
 	base := filepath.Base(name)
+	if mode == commandModeVerification {
+		return validateVerificationCommand(base, args)
+	}
 	switch base {
 	case "pwd", "ls", "find", "rg", "cat":
 		return nil
@@ -101,17 +144,53 @@ func validateReadOnlyCommand(name string, args []string) error {
 		default:
 			return fmt.Errorf("git %s is not allowlisted", args[0])
 		}
-	case "go":
-		if len(args) > 0 && args[0] == "test" {
-			return nil
-		}
-		return fmt.Errorf("only go test is allowlisted")
-	case "npm":
-		if len(args) > 0 && args[0] == "test" {
-			return nil
-		}
-		return fmt.Errorf("only npm test is allowlisted")
 	default:
 		return fmt.Errorf("%s is not allowlisted", name)
+	}
+}
+
+func validateVerificationCommand(base string, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("%s verification command requires arguments", base)
+	}
+	switch base {
+	case "go":
+		switch args[0] {
+		case "test", "build", "vet":
+			return nil
+		}
+		return fmt.Errorf("go %s is not an allowlisted verification command", args[0])
+	case "npm":
+		switch args[0] {
+		case "test", "run":
+			return nil
+		}
+		return fmt.Errorf("npm %s is not an allowlisted verification command", args[0])
+	case "python", "python3":
+		if len(args) >= 2 && args[0] == "-m" {
+			switch args[1] {
+			case "pytest", "unittest", "compileall":
+				return nil
+			}
+		}
+		return fmt.Errorf("only python -m pytest|unittest|compileall is allowlisted")
+	case "pytest":
+		return nil
+	case "cargo":
+		switch args[0] {
+		case "test", "build", "check", "clippy":
+			return nil
+		}
+		return fmt.Errorf("cargo %s is not an allowlisted verification command", args[0])
+	case "shellcheck":
+		return nil
+	case "make":
+		switch args[0] {
+		case "test", "check", "lint", "build":
+			return nil
+		}
+		return fmt.Errorf("make %s is not an allowlisted verification target", args[0])
+	default:
+		return fmt.Errorf("%s is not an allowlisted verification command", base)
 	}
 }

@@ -55,6 +55,8 @@ func main() {
 	toolRegistry.Register(tools.NewSearchFilesTool(toolLimits))
 	toolRegistry.Register(tools.NewCreateFileTool(toolLimits))
 	toolRegistry.Register(tools.NewRunCommandTool(toolLimits))
+	toolRegistry.Register(tools.NewRunReadOnlyCommandTool(toolLimits))
+	toolRegistry.Register(tools.NewRunVerificationCommandTool(toolLimits))
 	toolRegistry.Register(tools.NewGitStatusTool(toolLimits))
 	toolRegistry.Register(tools.NewGitDiffTool(toolLimits))
 	toolRegistry.Register(tools.NewGitLogTool(toolLimits))

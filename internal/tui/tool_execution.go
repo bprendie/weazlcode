@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -25,6 +27,7 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 		tool, ok := m.toolRegistry.Get(call.Function.Name)
 		if !ok {
 			result := fmt.Sprintf("Tool %q not found", call.Function.Name)
+			m.logToolCall(call.ID, call.Function.Name, tools.SafetyLevelSafe, call.Function.Arguments, "", result, time.Duration(0), false)
 			m.toolResults = append(m.toolResults, result)
 			if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {
 				m.err = err.Error()
@@ -34,6 +37,7 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 
 		if !m.cfg.Tools.AutoExecute && tool.SafetyLevel() != tools.SafetyLevelSafe {
 			result := fmt.Sprintf("Tool %q requires manual approval (auto-execute disabled)", call.Function.Name)
+			m.logToolCall(call.ID, call.Function.Name, tool.SafetyLevel(), call.Function.Arguments, "", result, time.Duration(0), false)
 			m.toolResults = append(m.toolResults, result)
 			if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {
 				m.err = err.Error()
@@ -44,6 +48,7 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 		var args map[string]any
 		if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 			result := fmt.Sprintf("Failed to parse arguments: %v", err)
+			m.logToolCall(call.ID, call.Function.Name, tool.SafetyLevel(), call.Function.Arguments, "", result, time.Duration(0), false)
 			m.toolResults = append(m.toolResults, result)
 			if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {
 				m.err = err.Error()
@@ -52,12 +57,16 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		start := time.Now()
 		result, err := tool.Execute(ctx, args)
+		duration := time.Since(start)
 		cancel()
+		success := err == nil
 		if err != nil {
 			result = fmt.Sprintf("Tool error: %v", err)
 		}
 		result = limitToolOutput(result, m.cfg.Tools.MaxOutputChars)
+		m.logToolCall(call.ID, call.Function.Name, tool.SafetyLevel(), call.Function.Arguments, args, result, duration, success)
 
 		m.toolResults = append(m.toolResults, result)
 		if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {
@@ -92,4 +101,72 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 	m.pendingTools = nil
 
 	return m, tea.Batch(m.startStream(ch, "", contextHistory), waitStream(ch), m.working.Tick)
+}
+
+type toolCallLog struct {
+	Time       string `json:"time"`
+	SessionID  string `json:"session_id"`
+	CallID     string `json:"call_id"`
+	Tool       string `json:"tool"`
+	Safety     string `json:"safety"`
+	ArgsRaw    string `json:"args_raw,omitempty"`
+	Args       any    `json:"args,omitempty"`
+	Result     string `json:"result"`
+	DurationMS int64  `json:"duration_ms"`
+	Success    bool   `json:"success"`
+	Project    string `json:"project"`
+}
+
+func (m model) logToolCall(callID, name string, safety tools.SafetyLevel, rawArgs string, args any, result string, duration time.Duration, success bool) {
+	if m.project.LogDir == "" {
+		return
+	}
+	if err := os.MkdirAll(m.project.LogDir, 0o700); err != nil {
+		return
+	}
+	entry := toolCallLog{
+		Time:       time.Now().Format(time.RFC3339Nano),
+		SessionID:  m.session.ID,
+		CallID:     callID,
+		Tool:       name,
+		Safety:     safetyLabel(safety),
+		ArgsRaw:    truncateLogText(rawArgs),
+		Args:       args,
+		Result:     truncateLogText(result),
+		DurationMS: duration.Milliseconds(),
+		Success:    success,
+		Project:    m.project.Root,
+	}
+	b, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	path := filepath.Join(m.project.LogDir, "tool_calls.jsonl")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	_, _ = f.Write(append(b, '\n'))
+}
+
+func safetyLabel(level tools.SafetyLevel) string {
+	switch level {
+	case tools.SafetyLevelSafe:
+		return "safe"
+	case tools.SafetyLevelPrompt:
+		return "prompt"
+	case tools.SafetyLevelDangerous:
+		return "dangerous"
+	default:
+		return "unknown"
+	}
+}
+
+func truncateLogText(s string) string {
+	const limit = 4000
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + fmt.Sprintf("\n[log truncated: %d chars omitted]", len(s)-limit)
 }
