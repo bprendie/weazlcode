@@ -66,7 +66,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 - [x] Add `internal/coding`.
 - [x] Define `Plan`, `Task`, `AcceptanceCheck`, and `ReviewVerdict` structs.
-- [ ] Add JSON schema or strict parser for orchestrator-produced plans.
+- [x] Add JSON schema or strict parser for orchestrator-produced plans.
 - [x] Store plans and tasks in SQLite.
 - [x] Add plan status values: `draft`, `approved`, `running`, `blocked`, `done`, plus task `reviewing`.
 - [x] Add local `/plan` and `/tasks` commands in the TUI.

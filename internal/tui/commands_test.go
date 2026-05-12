@@ -105,6 +105,26 @@ func TestSlashPacketCommand(t *testing.T) {
 	}
 }
 
+func TestSlashPlanImportCommand(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Imported","summary":"From orchestrator","tasks":[{"title":"Task","goal":"Do imported work","allowed_paths":["internal/coding"],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	got := updated.(model)
+	if got.status != "plan imported" {
+		t.Fatalf("status = %q, want plan imported", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Title != "Imported" || len(plan.Tasks) != 1 || plan.Tasks[0].PlanID != plan.ID {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+}
+
 func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()

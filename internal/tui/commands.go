@@ -43,7 +43,7 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.addSystemNote("Tools:\n" + strings.Join(m.getToolNames(), "\n"))
 		m.status = "tool list"
 	case "plan":
-		return m.handlePlanCommand(fields[1:])
+		return m.handlePlanCommand(fields[1:], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "tasks":
 		m.addSystemNote(m.tasksCommandText())
 		m.status = "task list"
@@ -117,6 +117,7 @@ func slashHelp() string {
 		"/tools - list enabled tools",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
+		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
 		"/packet - show local-worker packet for the first pending task",
 		"/sessions - open sessions",
@@ -169,7 +170,7 @@ func firstRunnableTask(tasks []coding.Task) (coding.Task, bool) {
 	return coding.Task{}, false
 }
 
-func (m model) handlePlanCommand(args []string) (tea.Model, tea.Cmd, bool) {
+func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {
 	if len(args) > 0 && strings.ToLower(args[0]) == "draft" {
 		title := strings.TrimSpace(strings.Join(args[1:], " "))
 		if title == "" {
@@ -204,6 +205,36 @@ func (m model) handlePlanCommand(args []string) (tea.Model, tea.Cmd, bool) {
 		}
 		m.addSystemNote(renderPlan(plan))
 		m.status = "draft plan created"
+		return m, nil, true
+	}
+	if len(args) > 0 && strings.ToLower(args[0]) == "import" {
+		raw := strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0]))
+		if raw == "" {
+			m.addSystemNote("Usage: /plan import <json>")
+			m.status = "plan import usage"
+			return m, nil, true
+		}
+		plan, err := coding.DecodePlanJSON([]byte(raw))
+		if err != nil {
+			m.addSystemNote("Plan import error: " + err.Error())
+			m.status = "plan import failed"
+			return m, nil, true
+		}
+		plan = coding.PrepareImportedPlan(plan, m.session.ID, m.project.Root, uuid.NewString)
+		if err := coding.ValidatePlan(plan); err != nil {
+			m.addSystemNote("Plan import error: " + err.Error())
+			m.status = "plan import failed"
+			return m, nil, true
+		}
+		if err := m.store.SavePlan(plan); err != nil {
+			m.err = err.Error()
+			return m, nil, true
+		}
+		if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+			plan = saved
+		}
+		m.addSystemNote(renderPlan(plan))
+		m.status = "plan imported"
 		return m, nil, true
 	}
 	m.addSystemNote(m.planCommandText())
