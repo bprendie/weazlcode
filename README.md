@@ -106,6 +106,7 @@ Run setup first if you want the guided config flow:
 ## Keys
 
 - `enter`: send message / select session
+- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history
 - `pgup` / `pgdown`: scroll chat history

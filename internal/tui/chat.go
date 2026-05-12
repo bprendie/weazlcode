@@ -75,6 +75,9 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		if prompt == "" {
 			return m, nil
 		}
+		if updated, cmd, handled := m.handleSlashCommand(prompt); handled {
+			return updated, cmd
+		}
 		m.input.Reset()
 		m.pasteText = ""
 		m.pasteLines = 0
