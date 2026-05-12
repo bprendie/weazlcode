@@ -1037,10 +1037,7 @@ func (m model) diffCommandText() string {
 	if err != nil {
 		return "Diff error: " + err.Error()
 	}
-	if strings.TrimSpace(diff) == "" {
-		return "Diff:\nNo changes."
-	}
-	return "Diff:\n" + diff
+	return renderDiffView(diff)
 }
 
 func emptyFallback(value, fallback string) string {

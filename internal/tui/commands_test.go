@@ -101,7 +101,7 @@ func TestSlashDiffCommand(t *testing.T) {
 		t.Fatalf("mode/status = %v/%q", got.mode, got.status)
 	}
 	view := got.viewport.View()
-	if !strings.Contains(view, "Diff:") || !strings.Contains(view, "README.md") {
+	if !strings.Contains(view, "Diff: 1 file(s)") || !strings.Contains(view, "1. README.md") {
 		t.Fatalf("viewport missing diff: %q", view)
 	}
 }
