@@ -226,6 +226,9 @@ func (m model) helpText() string {
 	if m.mode == modeWorkspace {
 		return "enter replay | ctrl+e rename | ctrl+d delete | esc back | ctrl+c quit"
 	}
+	if m.mode == modeIDEView {
+		return "/ commands | /chat back | wheel/pgup/pgdn scroll | esc chat | ctrl+c quit"
+	}
 	mouseHelp := "ctrl+m copy"
 	if !m.mouseScroll {
 		mouseHelp = "ctrl+m mouse"

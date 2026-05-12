@@ -34,25 +34,27 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 
 	switch name {
 	case "", "help", "?":
-		m.addSystemNote(slashHelp())
-		m.status = "slash commands"
+		m.setIDEView("help", slashHelp())
 	case "project":
-		m.addSystemNote(m.projectCommandText())
-		m.status = "project summary"
+		m.setIDEView("project", m.projectCommandText())
 	case "models":
-		m.addSystemNote(m.modelRolesText())
-		m.status = "model roles"
+		m.setIDEView("models", m.modelRolesText())
 	case "tools":
-		m.addSystemNote("Tools:\n" + strings.Join(m.getToolNames(), "\n"))
-		m.status = "tool list"
+		m.setIDEView("tools", m.toolsViewText())
+	case "config":
+		m.setIDEView("config", m.configViewText())
+	case "diff":
+		m.setIDEView("diff", m.diffCommandText())
+	case "chat":
+		m.mode = modeChat
+		m.status = "chat"
+		m.renderMessages()
 	case "plan":
 		return m.handlePlanCommand(fields[1:], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "tasks":
-		m.addSystemNote(m.tasksCommandText())
-		m.status = "task list"
+		m.setIDEView("tasks", m.tasksCommandText())
 	case "packet":
-		m.addSystemNote(m.packetCommandText())
-		m.status = "task packet"
+		m.setIDEView("packet", m.packetCommandText())
 	case "approve":
 		return m.approveLatestPlan()
 	case "reject":
@@ -62,8 +64,7 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "worker-patch":
 		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "reviewer-input":
-		m.addSystemNote(m.reviewerInputCommandText())
-		m.status = "reviewer input"
+		m.setIDEView("reviewer-input", m.reviewerInputCommandText())
 	case "review":
 		return m.importReviewVerdict(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "sessions":
@@ -96,6 +97,14 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.status = "unknown slash command"
 	}
 	return m, nil, true
+}
+
+func (m *model) setIDEView(name, text string) {
+	m.mode = modeIDEView
+	m.status = "view " + name
+	m.viewport.SetContent(m.styles.system.Render(text))
+	m.viewport.GotoTop()
+	m.input.Focus()
 }
 
 func (m model) showSessionsWithInputCleared() (tea.Model, tea.Cmd, bool) {
@@ -131,6 +140,9 @@ func slashHelp() string {
 		"/project - show active project",
 		"/models - show model role mapping",
 		"/tools - list enabled tools",
+		"/config - show current local configuration summary",
+		"/diff - show current git diff",
+		"/chat - return to chat transcript",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/plan import <json> - validate and store a structured plan JSON payload",
@@ -884,8 +896,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 		m.status = "plan imported"
 		return m, nil, true
 	}
-	m.addSystemNote(m.planCommandText())
-	m.status = "latest plan"
+	m.setIDEView("plan", m.planCommandText())
 	return m, nil, true
 }
 
@@ -984,6 +995,52 @@ func (m model) modelRolesText() string {
 		roleProvider("reviewer", m.cfg.ModelRoles.Reviewer),
 		roleProvider("summarizer", m.cfg.ModelRoles.Summarizer),
 	}, "\n")
+}
+
+func (m model) toolsViewText() string {
+	registered := m.toolRegistry.List()
+	if len(registered) == 0 {
+		return "Tools:\nnone registered"
+	}
+	var b strings.Builder
+	b.WriteString("Tools:\n")
+	for _, tool := range registered {
+		fmt.Fprintf(&b, "- %s [%s]\n  %s\n", tool.Name(), safetyLabel(tool.SafetyLevel()), tool.Description())
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) configViewText() string {
+	active := m.cfg.Active()
+	var b strings.Builder
+	fmt.Fprintf(&b, "Config:\npath: %s\nactive_provider: %s\nactive_model: %s/%s\nserver_url: %s\ncontext_window: %d\nmarkdown: %t (%s)\nresume_last_session: %t\n\nModel roles:\n",
+		emptyFallback(m.cfgPath, "default"),
+		m.cfg.ActiveProvider,
+		active.Type,
+		active.Model,
+		emptyFallback(active.ServerURL, "not set"),
+		active.ContextWindow,
+		m.cfg.UI.MarkdownEnabled(),
+		m.cfg.UI.MarkdownStyle,
+		m.cfg.UI.ResumeLastSession,
+	)
+	fmt.Fprintf(&b, "- orchestrator: %s\n", m.cfg.ModelRoles.Orchestrator)
+	fmt.Fprintf(&b, "- worker: %s\n", m.cfg.ModelRoles.Worker)
+	fmt.Fprintf(&b, "- reviewer: %s\n", m.cfg.ModelRoles.Reviewer)
+	fmt.Fprintf(&b, "- summarizer: %s\n", m.cfg.ModelRoles.Summarizer)
+	fmt.Fprintf(&b, "\nTools:\nenabled: %t\nauto_execute_safe: %t\nmax_output_chars: %d\nmax_file_bytes: %d\n", m.cfg.Tools.Enabled, m.cfg.Tools.AutoExecute, m.cfg.Tools.MaxOutputChars, m.cfg.Tools.MaxFileBytes)
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) diffCommandText() string {
+	diff, err := m.gitDiff()
+	if err != nil {
+		return "Diff error: " + err.Error()
+	}
+	if strings.TrimSpace(diff) == "" {
+		return "Diff:\nNo changes."
+	}
+	return "Diff:\n" + diff
 }
 
 func emptyFallback(value, fallback string) string {

@@ -67,7 +67,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.finishRenameWorkspace()
 	case modeClearContext:
 		return m.confirmClearContext()
-	case modeChat:
+	case modeChat, modeIDEView:
 		if m.thinking {
 			return m, nil
 		}
@@ -77,6 +77,10 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		}
 		if updated, cmd, handled := m.handleSlashCommand(prompt); handled {
 			return updated, cmd
+		}
+		if m.mode == modeIDEView {
+			m.mode = modeChat
+			m.renderMessages()
 		}
 		m.input.Reset()
 		m.pasteText = ""

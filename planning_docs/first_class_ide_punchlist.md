@@ -90,7 +90,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 ## Milestone 6: IDE TUI
 
 - [x] Add slash-command mode for local app commands.
-- [ ] Add durable view modes: chat, plan, diff, tools, sessions, config.
+- [x] Add durable view modes: chat, plan, diff, tools, sessions, config.
 - [ ] Add diff viewer with file list and hunks.
 - [ ] Add tool-call approval modal.
 - [ ] Add task progress indicator.

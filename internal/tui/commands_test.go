@@ -44,8 +44,8 @@ func TestSlashProjectCommand(t *testing.T) {
 	if !strings.Contains(got.viewport.View(), "root: /tmp/weazlcode") {
 		t.Fatalf("viewport missing project root: %q", got.viewport.View())
 	}
-	if got.status != "project summary" {
-		t.Fatalf("status = %q, want project summary", got.status)
+	if got.status != "view project" || got.mode != modeIDEView {
+		t.Fatalf("status/mode = %q/%v, want view project/%v", got.status, got.mode, modeIDEView)
 	}
 }
 
@@ -58,6 +58,51 @@ func TestSlashModelsCommand(t *testing.T) {
 	got := updated.(model)
 	if !strings.Contains(got.viewport.View(), "worker: local-ollama -> ollama/llama3.1") {
 		t.Fatalf("viewport missing model roles: %q", got.viewport.View())
+	}
+}
+
+func TestSlashDurableIDEViews(t *testing.T) {
+	m := commandTestModel(t)
+	for _, command := range []string{"/tools", "/config"} {
+		updated, _, handled := m.handleSlashCommand(command)
+		if !handled {
+			t.Fatalf("%s handled = false, want true", command)
+		}
+		got := updated.(model)
+		if got.mode != modeIDEView {
+			t.Fatalf("%s mode = %v, want modeIDEView", command, got.mode)
+		}
+		if !strings.HasPrefix(got.status, "view ") {
+			t.Fatalf("%s status = %q", command, got.status)
+		}
+		if strings.TrimSpace(got.viewport.View()) == "" {
+			t.Fatalf("%s viewport empty", command)
+		}
+		m = got
+	}
+	updated, _, handled := m.handleSlashCommand("/chat")
+	if !handled {
+		t.Fatal("/chat handled = false, want true")
+	}
+	got := updated.(model)
+	if got.mode != modeChat || got.status != "chat" {
+		t.Fatalf("mode/status = %v/%q, want chat", got.mode, got.status)
+	}
+}
+
+func TestSlashDiffCommand(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, _, handled := m.handleSlashCommand("/diff")
+	if !handled {
+		t.Fatal("diff handled = false, want true")
+	}
+	got := updated.(model)
+	if got.mode != modeIDEView || got.status != "view diff" {
+		t.Fatalf("mode/status = %v/%q", got.mode, got.status)
+	}
+	view := got.viewport.View()
+	if !strings.Contains(view, "Diff:") || !strings.Contains(view, "README.md") {
+		t.Fatalf("viewport missing diff: %q", view)
 	}
 }
 
@@ -334,11 +379,11 @@ func TestSlashReviewerInputCommand(t *testing.T) {
 		t.Fatal("reviewer-input handled = false")
 	}
 	got := updated.(model)
-	view := got.viewport.View()
-	if got.status != "reviewer input" {
-		t.Fatalf("status = %q, want reviewer input", got.status)
+	if got.status != "view reviewer-input" {
+		t.Fatalf("status = %q, want view reviewer-input", got.status)
 	}
-	if !strings.Contains(view, `"verification_output"`) || !strings.Contains(view, `"constraints"`) {
+	view := got.viewport.View()
+	if !strings.Contains(view, "Reviewer input:") {
 		t.Fatalf("viewport missing reviewer input: %q", view)
 	}
 	input, err := m.buildReviewerInput()

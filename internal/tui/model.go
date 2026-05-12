@@ -27,6 +27,7 @@ const (
 	modeServer
 	modeLoading
 	modeChat
+	modeIDEView
 	modeSessions
 	modeWorkspace
 	modeRenameWorkspace
@@ -160,13 +161,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.renderMessages()
 		}
 	case tea.MouseMsg:
-		if m.mode == modeChat {
+		if m.mode == modeChat || m.mode == modeIDEView {
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
 		}
 	case tea.KeyMsg:
-		if m.mode == modeChat && !m.thinking {
+		if (m.mode == modeChat || m.mode == modeIDEView) && !m.thinking {
 			if updated, cmd, handled := m.handleChatKey(msg); handled {
 				return updated, cmd
 			}
@@ -214,29 +215,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.startRenameWorkspace()
 			}
 		case "pgup":
-			if m.mode == modeChat {
+			if m.mode == modeChat || m.mode == modeIDEView {
 				m.viewport.PageUp()
 				return m, nil
 			}
 		case "pgdown":
-			if m.mode == modeChat {
+			if m.mode == modeChat || m.mode == modeIDEView {
 				m.viewport.PageDown()
 				return m, nil
 			}
 		case "home":
-			if m.mode == modeChat {
+			if m.mode == modeChat || m.mode == modeIDEView {
 				m.viewport.GotoTop()
 				return m, nil
 			}
 		case "end":
-			if m.mode == modeChat {
+			if m.mode == modeChat || m.mode == modeIDEView {
 				m.viewport.GotoBottom()
 				return m, nil
 			}
 		case "esc":
-			if m.mode == modeSessions || m.mode == modeWorkspace {
+			if m.mode == modeSessions || m.mode == modeWorkspace || m.mode == modeIDEView {
 				m.mode = modeChat
 				m.input.Focus()
+				m.renderMessages()
 			}
 			if m.mode == modeRenameWorkspace {
 				return m.cancelRenameWorkspace()
