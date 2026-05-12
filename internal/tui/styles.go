@@ -32,7 +32,7 @@ func newStyles() styles {
 		frame: lipgloss.NewStyle().
 			Foreground(ink).
 			Background(lipgloss.Color("#0D0D12")).
-			Padding(1, 2),
+			Padding(1, 1),
 		header: lipgloss.NewStyle().
 			Foreground(crushPink).
 			Bold(true),

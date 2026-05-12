@@ -23,7 +23,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Mark README as work in progress.
 - [x] Keep the same license as WeazlChat.
 - [x] Verify tests pass after the rename.
-- [ ] Decide whether `handover.md` stays, moves under `planning_docs/`, or becomes a fresh `AGENTS.md`.
+- [x] Remove copied WeazlChat handover/history docs that are not current WeazlCode planning material.
 - [ ] Make first baseline commit.
 
 ## Milestone 1: Project Awareness
@@ -94,7 +94,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [ ] Add fuzzy file picker.
 - [ ] Add file preview pane.
 - [ ] Add status badges for dirty repo, current branch, active role, and context usage.
-- [ ] Keep existing WeazlChat copy/mouse/scroll behavior working.
+- [ ] Keep existing copy/mouse/scroll behavior working.
 
 ## Milestone 7: LSP Foundation
 

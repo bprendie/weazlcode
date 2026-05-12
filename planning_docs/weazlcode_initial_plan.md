@@ -272,11 +272,10 @@ Keybindings can follow the WeazlCode style:
 
 ## Open Decisions
 
-- Should the copied WeazlChat handover/history docs stay in the repo, move under planning docs, or be replaced with fresh WeazlCode docs?
 - Should the project instruction file be `AGENTS.md`, `WEAZLCODE.md`, or both?
 - Should frontier orchestration use official APIs first, CLI subscriptions first, or support both?
 - Should workers edit directly, or should all worker output be patches reviewed before applying?
-- Should WeazlCode support parallel worker tasks in the MVP, or start with one worker at a time?
+- Single-worker execution is the MVP target; parallel workers can wait until the review loop is reliable.
 - Should task execution be fully automatic after approval, or step through each module interactively?
 
 ## Recommended First Build

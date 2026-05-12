@@ -97,7 +97,7 @@ func (m *model) renderMessages() {
 func (m *model) renderTranscript(messages []storage.Message) string {
 	var b strings.Builder
 	if len(messages) == 0 {
-		b.WriteString(m.styles.system.Render("W34Zl Ch4T is ready. Local providers only."))
+		b.WriteString(m.styles.system.Render("WeazlCode is ready. Local providers only."))
 		if m.cfg.Tools.Enabled {
 			b.WriteString("\n")
 			b.WriteString(m.styles.system.Render("Tools enabled: " + strings.Join(m.getToolNames(), ", ")))
@@ -276,12 +276,12 @@ func (m *model) renderContent(role, content string) string {
 
 // ansiHeader returns the ASCII art header
 func ansiHeader() string {
-	return ` __      __          _______________.__  _________ .__        ________________
-/  \    /  \ ____   /  |  \____    /|  | \_   ___ \|  |__    /  |  \__    ___/
-\   \/\/   // __ \ /   |  |_/     / |  | /    \  \/|  |  \  /   |  |_|    |   
- \        /\  ___//    ^   /     /_ |  |_\     \___|   Y  \/    ^   /|    |   
-  \__/\  /  \___  >____   /_______ \|____/\______  /___|  /\____   | |____|   
-       \/       \/     |__|       \/             \/     \/      |__|`
+	return ` __      __          _______________.__    .____  _______       .___________  
+/  \    /  \ ____   /  |  \____    /|  |   |   _| \   _  \    __| _/\_____  \ 
+\   \/\/   // __ \ /   |  |_/     / |  |   |  |   /  /_\  \  / __ |   _(__  < 
+ \        /\  ___//    ^   /     /_ |  |__ |  |   \  \_/   \/ /_/ |  /       \
+  \__/\  /  \___  >____   /_______ \|____/ |  |_   \_____  /\____ | /______  /
+       \/       \/     |__|       \/       |____|        \/      \/        \/ `
 }
 
 // trimTitle shortens a title to fit display constraints
