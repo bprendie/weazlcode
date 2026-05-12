@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -356,9 +357,76 @@ func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
 		Message: emptyFallback(patch.Summary, "Worker patch applied; task is ready for review."),
 		Payload: payload,
 	})
-	m.addSystemNote("Worker patch applied; task is ready for review:\n" + renderJSON(result))
+	verification, err := m.runTaskVerification(task)
+	if err != nil {
+		payload, _ := json.Marshal(struct {
+			Error string `json:"error"`
+		}{Error: err.Error()})
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "verification_error",
+			Message: err.Error(),
+			Payload: payload,
+		})
+		m.addSystemNote("Verification error: " + err.Error())
+		m.status = "verification failed"
+		return m, nil, true
+	}
+	if len(verification) > 0 {
+		payload, _ := json.Marshal(verification)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "verification",
+			Message: fmt.Sprintf("Ran %d verification command(s).", len(verification)),
+			Payload: payload,
+		})
+	}
+	m.addSystemNote("Worker patch applied; task is ready for review:\n" + renderJSON(struct {
+		Patch        coding.PatchApplyResult `json:"patch"`
+		Verification []verificationResult    `json:"verification,omitempty"`
+	}{
+		Patch:        result,
+		Verification: verification,
+	}))
 	m.status = "task reviewing"
 	return m, nil, true
+}
+
+type verificationResult struct {
+	Command string `json:"command"`
+	Output  string `json:"output"`
+}
+
+func (m model) runTaskVerification(task coding.Task) ([]verificationResult, error) {
+	commands := taskVerification(task)
+	if len(commands) == 0 {
+		return nil, nil
+	}
+	tool, ok := m.toolRegistry.Get("run_verification_command")
+	if !ok {
+		return nil, fmt.Errorf("run_verification_command tool is not registered")
+	}
+	results := make([]verificationResult, 0, len(commands))
+	for _, commandText := range commands {
+		name, args, err := splitVerificationCommand(commandText)
+		if err != nil {
+			return nil, err
+		}
+		rawArgs := make([]any, 0, len(args))
+		for _, arg := range args {
+			rawArgs = append(rawArgs, arg)
+		}
+		output, err := tool.Execute(context.Background(), map[string]any{
+			"command": name,
+			"args":    rawArgs,
+			"cwd":     m.project.Root,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", commandText, err)
+		}
+		results = append(results, verificationResult{Command: commandText, Output: output})
+	}
+	return results, nil
 }
 
 func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
@@ -413,6 +481,21 @@ func taskAllowedPaths(task coding.Task) []string {
 		return []string{"."}
 	}
 	return task.AllowedPaths
+}
+
+func taskVerification(task coding.Task) []string {
+	if len(task.Verification) == 0 {
+		return []string{"go test ./..."}
+	}
+	return task.Verification
+}
+
+func splitVerificationCommand(commandText string) (string, []string, error) {
+	fields := strings.Fields(commandText)
+	if len(fields) == 0 {
+		return "", nil, fmt.Errorf("verification command is empty")
+	}
+	return fields[0], fields[1:], nil
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {

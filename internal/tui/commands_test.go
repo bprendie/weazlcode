@@ -308,7 +308,7 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	m.project.StateDir = filepath.Join(root, ".weazlcode")
 	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
 	m.session.ProjectRoot = root
-	rawPlan := `{"title":"Patch README","summary":"Apply worker patch","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	rawPlan := `{"title":"Patch README","summary":"Apply worker patch","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"verification":["python -m compileall ."],"acceptance_checks":[{"description":"README changed"}]}]}`
 	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
 	if !handled {
 		t.Fatal("plan import handled = false")
@@ -368,7 +368,7 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 3 || events[2].Type != "worker_patch" || len(events[2].Payload) == 0 {
+	if len(events) != 4 || events[2].Type != "worker_patch" || events[3].Type != "verification" || len(events[3].Payload) == 0 {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -377,6 +377,7 @@ func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewCalculatorTool())
+	registry.Register(tools.NewRunVerificationCommandTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
 	ti := textinput.New()
 	ti.Focus()
 	var store *storage.Store
