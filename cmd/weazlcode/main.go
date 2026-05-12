@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bprendie/weazlcode/internal/config"
+	"github.com/bprendie/weazlcode/internal/project"
 	"github.com/bprendie/weazlcode/internal/storage"
 	"github.com/bprendie/weazlcode/internal/tools"
 	"github.com/bprendie/weazlcode/internal/tui"
@@ -31,8 +32,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	projectSummary, err := project.Detect("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "project: %v\n", err)
+		os.Exit(1)
+	}
+	workspaceRoots := append([]string{}, cfg.Tools.WorkspaceRoots...)
+	workspaceRoots = append(workspaceRoots, projectSummary.Root)
 	toolLimits := tools.Limits{
-		WorkspaceRoots: cfg.Tools.WorkspaceRoots,
+		WorkspaceRoots: workspaceRoots,
 		MaxOutputChars: cfg.Tools.MaxOutputChars,
 		MaxFileBytes:   cfg.Tools.MaxFileBytes,
 	}
@@ -58,7 +66,7 @@ func main() {
 		toolRegistry.Register(tools.NewWebSearchTool(cfg.Tools.BraveAPIKey))
 	}
 
-	p := tea.NewProgram(tui.New(cfg, cfgPath, store, toolRegistry), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(tui.New(cfg, cfgPath, store, toolRegistry, projectSummary), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		os.Exit(1)

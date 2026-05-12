@@ -19,7 +19,11 @@ type sessionItem struct {
 
 func (i sessionItem) Title() string { return i.session.Title }
 func (i sessionItem) Description() string {
-	return fmt.Sprintf("%s / %s   in %d / out %d", i.session.Provider, i.session.Model, i.session.InputTokens, i.session.OutputTokens)
+	project := i.session.ProjectRoot
+	if project != "" {
+		project = "   " + project
+	}
+	return fmt.Sprintf("%s / %s   in %d / out %d%s", i.session.Provider, i.session.Model, i.session.InputTokens, i.session.OutputTokens, project)
 }
 func (i sessionItem) FilterValue() string { return i.session.Title }
 
@@ -88,12 +92,13 @@ func (m model) loadPreviousSession() tea.Cmd {
 func (m model) newSession() (tea.Model, tea.Cmd) {
 	p := m.cfg.Active()
 	sess := storage.Session{
-		ID:       uuid.NewString(),
-		Title:    "New session",
-		Provider: m.cfg.ActiveProvider,
-		Model:    p.Model,
+		ID:          uuid.NewString(),
+		Title:       "New session",
+		Provider:    m.cfg.ActiveProvider,
+		Model:       p.Model,
+		ProjectRoot: m.project.Root,
 	}
-	if err := m.store.CreateSession(sess.ID, sess.Title, sess.Provider, sess.Model); err != nil {
+	if err := m.store.CreateProjectSession(sess.ID, sess.Title, sess.Provider, sess.Model, sess.ProjectRoot); err != nil {
 		m.err = err.Error()
 		return m, nil
 	}
@@ -107,7 +112,7 @@ func (m model) newSession() (tea.Model, tea.Cmd) {
 	m.historyIdx = 0
 	m.historyDraft = ""
 	m.mode = modeChat
-	m.status = fmt.Sprintf("%s %s", p.Type, p.Model)
+	m.status = fmt.Sprintf("%s %s | %s", p.Type, p.Model, m.project.StatusLabel())
 	m.renderMessages()
 	return m, nil
 }
@@ -127,7 +132,7 @@ func (m model) loadSession(sess storage.Session) (tea.Model, tea.Cmd) {
 	m.activeWorkspaceName = ""
 	m.activeWorkspaceAt = time.Time{}
 	m.mode = modeChat
-	m.status = "resumed " + sess.Title
+	m.status = "resumed " + sess.Title + " | " + m.project.StatusLabel()
 	m.input.Focus()
 	m.renderMessages()
 	return m, nil

@@ -29,6 +29,7 @@ type Session struct {
 	Title        string
 	Provider     string
 	Model        string
+	ProjectRoot  string
 	InputTokens  int
 	OutputTokens int
 	CreatedAt    time.Time
@@ -96,6 +97,7 @@ func (s *Store) Migrate() error {
 			title text not null,
 			provider text not null,
 			model text not null,
+			project_root text not null default '',
 			created_at datetime not null default current_timestamp,
 			updated_at datetime not null default current_timestamp
 		)`,
@@ -143,6 +145,9 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	if err := s.ensureColumn("sessions", "output_tokens", "integer not null default 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("sessions", "project_root", "text not null default ''"); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("messages", "tool_calls", "text"); err != nil {
@@ -195,9 +200,13 @@ func (s *Store) Unlocked() bool {
 }
 
 func (s *Store) CreateSession(id, title, provider, model string) error {
+	return s.CreateProjectSession(id, title, provider, model, "")
+}
+
+func (s *Store) CreateProjectSession(id, title, provider, model, projectRoot string) error {
 	_, err := s.db.Exec(
-		`insert into sessions (id, title, provider, model, updated_at) values (?, ?, ?, ?, current_timestamp)`,
-		id, title, provider, model,
+		`insert into sessions (id, title, provider, model, project_root, updated_at) values (?, ?, ?, ?, ?, current_timestamp)`,
+		id, title, provider, model, projectRoot,
 	)
 	return err
 }
@@ -220,7 +229,7 @@ func (s *Store) AddSessionTokens(id string, inputTokens, outputTokens int) error
 }
 
 func (s *Store) LatestSession() (Session, bool, error) {
-	rows, err := s.db.Query(`select id, title, provider, model, input_tokens, output_tokens, created_at, updated_at from sessions order by updated_at desc limit 1`)
+	rows, err := s.db.Query(`select id, title, provider, model, project_root, input_tokens, output_tokens, created_at, updated_at from sessions order by updated_at desc limit 1`)
 	if err != nil {
 		return Session{}, false, err
 	}
@@ -233,7 +242,7 @@ func (s *Store) LatestSession() (Session, bool, error) {
 }
 
 func (s *Store) ListSessions(limit int) ([]Session, error) {
-	rows, err := s.db.Query(`select id, title, provider, model, input_tokens, output_tokens, created_at, updated_at from sessions order by updated_at desc limit ?`, limit)
+	rows, err := s.db.Query(`select id, title, provider, model, project_root, input_tokens, output_tokens, created_at, updated_at from sessions order by updated_at desc limit ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +259,7 @@ func (s *Store) ListSessions(limit int) ([]Session, error) {
 }
 
 func (s *Store) Session(id string) (Session, bool, error) {
-	rows, err := s.db.Query(`select id, title, provider, model, input_tokens, output_tokens, created_at, updated_at from sessions where id = ?`, id)
+	rows, err := s.db.Query(`select id, title, provider, model, project_root, input_tokens, output_tokens, created_at, updated_at from sessions where id = ?`, id)
 	if err != nil {
 		return Session{}, false, err
 	}
@@ -331,7 +340,7 @@ func scanSession(rows interface {
 	Scan(dest ...any) error
 }) (Session, error) {
 	var sess Session
-	return sess, rows.Scan(&sess.ID, &sess.Title, &sess.Provider, &sess.Model, &sess.InputTokens, &sess.OutputTokens, &sess.CreatedAt, &sess.UpdatedAt)
+	return sess, rows.Scan(&sess.ID, &sess.Title, &sess.Provider, &sess.Model, &sess.ProjectRoot, &sess.InputTokens, &sess.OutputTokens, &sess.CreatedAt, &sess.UpdatedAt)
 }
 
 func (s *Store) ensureColumn(table, name, spec string) error {

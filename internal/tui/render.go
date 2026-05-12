@@ -201,7 +201,7 @@ func (m model) metricsView() string {
 	budget := m.contextBudget()
 	contextTokens := m.contextTokenEstimate()
 	pct := min(1.0, float64(contextTokens)/float64(budget))
-	text := fmt.Sprintf("ctx %s %d/%d  in %d  out %d  %.1f t/s", m.contextBar.ViewAs(pct), contextTokens, budget, totalIn, totalOut, tps)
+	text := fmt.Sprintf("%s  ctx %s %d/%d  in %d  out %d  %.1f t/s", m.project.StatusLabel(), m.contextBar.ViewAs(pct), contextTokens, budget, totalIn, totalOut, tps)
 	width := max(20, m.width-6)
 	if len(text) < width {
 		text = strings.Repeat(" ", width-len(text)) + text

@@ -28,14 +28,14 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 1: Project Awareness
 
-- [ ] Add `internal/project`.
-- [ ] Detect git repo root from the current working directory.
-- [ ] Fall back to current directory for non-git projects.
-- [ ] Create project-local `.weazlcode/` for logs, transient state, and metadata.
-- [ ] Add `.weazlcodeignore` support using gitignore-style patterns.
-- [ ] Add project summary data: root, language hints, file counts, git branch, dirty state.
-- [ ] Store active project on each session.
-- [ ] Show project root and git branch in the TUI status area.
+- [x] Add `internal/project`.
+- [x] Detect git repo root from the current working directory.
+- [x] Fall back to current directory for non-git projects.
+- [x] Create project-local `.weazlcode/` for logs, transient state, and metadata.
+- [x] Add `.weazlcodeignore` support using gitignore-style patterns.
+- [x] Add project summary data: root, language hints, file counts, git branch, dirty state.
+- [x] Store active project on each session.
+- [x] Show project root and git branch in the TUI status area.
 
 ## Milestone 2: Coding Tools
 

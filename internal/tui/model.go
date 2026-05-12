@@ -15,6 +15,7 @@ import (
 
 	"github.com/bprendie/weazlcode/internal/config"
 	"github.com/bprendie/weazlcode/internal/llm"
+	"github.com/bprendie/weazlcode/internal/project"
 	"github.com/bprendie/weazlcode/internal/storage"
 	"github.com/bprendie/weazlcode/internal/tools"
 )
@@ -35,6 +36,7 @@ const (
 type model struct {
 	cfg                 config.Config
 	cfgPath             string
+	project             project.Summary
 	store               *storage.Store
 	toolRegistry        *tools.Registry
 	styles              styles
@@ -94,7 +96,7 @@ type contextTrimMsg struct {
 	err             error
 }
 
-func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *tools.Registry) tea.Model {
+func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *tools.Registry, projectSummary project.Summary) tea.Model {
 	ti := textinput.New()
 	ti.Placeholder = "database password"
 	ti.EchoMode = textinput.EchoPassword
@@ -116,6 +118,7 @@ func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *
 	return model{
 		cfg:          cfg,
 		cfgPath:      cfgPath,
+		project:      projectSummary,
 		store:        store,
 		toolRegistry: toolRegistry,
 		styles:       s,
@@ -128,7 +131,7 @@ func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *
 		working:      working,
 		contextBar:   contextBar,
 		mouseScroll:  true,
-		status:       "private local chat",
+		status:       "project " + projectSummary.StatusLabel(),
 	}
 }
 

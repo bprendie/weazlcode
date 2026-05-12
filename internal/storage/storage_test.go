@@ -194,3 +194,27 @@ func TestRenameWorkspace(t *testing.T) {
 		t.Fatalf("len(saves) = %d, want 0 after delete", len(saves))
 	}
 }
+
+func TestCreateProjectSessionStoresProjectRoot(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite3"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if err := store.CreateProjectSession("s1", "title", "provider", "model", "/tmp/project"); err != nil {
+		t.Fatalf("CreateProjectSession: %v", err)
+	}
+	sess, ok, err := store.Session("s1")
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if !ok {
+		t.Fatal("Session ok = false, want true")
+	}
+	if sess.ProjectRoot != "/tmp/project" {
+		t.Fatalf("ProjectRoot = %q, want /tmp/project", sess.ProjectRoot)
+	}
+}
