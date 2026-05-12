@@ -924,6 +924,7 @@ func (m model) tasksCommandText() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Tasks for %s:\n", plan.Title)
+	fmt.Fprintf(&b, "%s\n\n", taskProgressSummary(plan))
 	for i, task := range plan.Tasks {
 		fmt.Fprintf(&b, "%d. [%s] %s\n   %s\n", i+1, task.Status, task.Title, task.Goal)
 	}

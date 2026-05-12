@@ -154,6 +154,25 @@ func TestSlashPacketCommand(t *testing.T) {
 	}
 }
 
+func TestSlashTasksCommandShowsProgress(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Progress Plan","summary":"Track work","tasks":[{"title":"Done","goal":"Finished","status":"done"},{"title":"Run","goal":"Running","status":"running"},{"title":"Next","goal":"Pending","status":"pending"}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/tasks")
+	if !handled {
+		t.Fatal("tasks handled = false")
+	}
+	got := updated.(model)
+	view := got.viewport.View()
+	if !strings.Contains(view, "Progress: 1/3 done") || !strings.Contains(view, "1 running") || !strings.Contains(view, "1 pending") {
+		t.Fatalf("tasks missing progress: %q", view)
+	}
+}
+
 func TestSlashPlanImportCommand(t *testing.T) {
 	m := commandTestModel(t)
 	raw := `{"title":"Imported","summary":"From orchestrator","tasks":[{"title":"Task","goal":"Do imported work","allowed_paths":["internal/coding"],"acceptance_checks":[{"description":"checks pass"}]}]}`

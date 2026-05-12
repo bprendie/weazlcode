@@ -93,7 +93,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add durable view modes: chat, plan, diff, tools, sessions, config.
 - [x] Add diff viewer with file list and hunks.
 - [ ] Add tool-call approval modal.
-- [ ] Add task progress indicator.
+- [x] Add task progress indicator.
 - [ ] Add recent command output panel.
 - [ ] Add fuzzy file picker.
 - [ ] Add file preview pane.

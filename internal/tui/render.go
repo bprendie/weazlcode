@@ -201,12 +201,33 @@ func (m model) metricsView() string {
 	budget := m.contextBudget()
 	contextTokens := m.contextTokenEstimate()
 	pct := min(1.0, float64(contextTokens)/float64(budget))
-	text := fmt.Sprintf("%s  ctx %s %d/%d  in %d  out %d  %.1f t/s", m.project.StatusLabel(), m.contextBar.ViewAs(pct), contextTokens, budget, totalIn, totalOut, tps)
+	parts := []string{
+		m.project.StatusLabel(),
+		fmt.Sprintf("ctx %s %d/%d", m.contextBar.ViewAs(pct), contextTokens, budget),
+		fmt.Sprintf("in %d", totalIn),
+		fmt.Sprintf("out %d", totalOut),
+		fmt.Sprintf("%.1f t/s", tps),
+	}
+	if badge := m.taskProgressBadge(); badge != "" {
+		parts = append(parts, badge)
+	}
+	text := strings.Join(parts, "  ")
 	width := max(20, m.width-6)
 	if len(text) < width {
 		text = strings.Repeat(" ", width-len(text)) + text
 	}
 	return m.styles.help.Render(text)
+}
+
+func (m model) taskProgressBadge() string {
+	if m.store == nil || strings.TrimSpace(m.session.ID) == "" {
+		return ""
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		return ""
+	}
+	return taskProgressBadge(plan)
 }
 
 // helpText returns context-appropriate help text for the current mode
