@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func TestSlashHelpCommand(t *testing.T) {
 	if got.input.Value() != "" {
 		t.Fatalf("input = %q, want empty", got.input.Value())
 	}
-	if !strings.Contains(got.viewport.View(), "/project - show active project") {
+	if !strings.Contains(got.viewport.View(), "/reviewer-input - show frontier-review payload") {
 		t.Fatalf("viewport missing help: %q", got.viewport.View())
 	}
 }
@@ -299,10 +300,90 @@ func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 }
 
 func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
+	got, root := commandTestModelWithReviewingTask(t)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing", got.status)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new\n" {
+		t.Fatalf("README = %q, want new", data)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "reviewing" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 4 || events[2].Type != "worker_patch" || events[3].Type != "verification" || len(events[3].Payload) == 0 {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSlashReviewerInputCommand(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, _, handled := m.handleSlashCommand("/reviewer-input")
+	if !handled {
+		t.Fatal("reviewer-input handled = false")
+	}
+	got := updated.(model)
+	view := got.viewport.View()
+	if got.status != "reviewer input" {
+		t.Fatalf("status = %q, want reviewer input", got.status)
+	}
+	if !strings.Contains(view, `"verification_output"`) || !strings.Contains(view, `"constraints"`) {
+		t.Fatalf("viewport missing reviewer input: %q", view)
+	}
+	input, err := m.buildReviewerInput()
+	if err != nil {
+		t.Fatalf("buildReviewerInput: %v", err)
+	}
+	if !strings.Contains(input.Diff, "-old") || !strings.Contains(input.Diff, "+new") || !strings.Contains(input.VerificationOut, "python -m compileall .") {
+		t.Fatalf("reviewer input = %#v", input)
+	}
+}
+
+func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	raw := `{"verdict":"approve","summary":"Looks good"}`
+	updated, _, handled := m.handleSlashCommand("/review " + raw)
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task done" {
+		t.Fatalf("status = %q, want task done", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Status != "done" || plan.Tasks[0].Status != "done" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 5 || events[4].Type != "reviewer_verdict" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func commandTestModelWithReviewingTask(t *testing.T) (model, string) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
+	runTestGit(t, root, "init")
+	runTestGit(t, root, "add", "README.md")
 	m := commandTestModel(t)
 	m.project.Root = root
 	m.project.StateDir = filepath.Join(root, ".weazlcode")
@@ -346,30 +427,15 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	if !handled {
 		t.Fatal("worker-patch handled = false")
 	}
-	got := updated.(model)
-	if got.status != "task reviewing" {
-		t.Fatalf("status = %q, want task reviewing", got.status)
-	}
-	data, err := os.ReadFile(filepath.Join(root, "README.md"))
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if string(data) != "new\n" {
-		t.Fatalf("README = %q, want new", data)
-	}
-	plan, ok, err = got.store.LatestPlan(got.session.ID)
-	if err != nil {
-		t.Fatalf("LatestPlan: %v", err)
-	}
-	if !ok || plan.Tasks[0].Status != "reviewing" {
-		t.Fatalf("plan = %#v ok=%v", plan, ok)
-	}
-	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
-	if err != nil {
-		t.Fatalf("TaskEvents: %v", err)
-	}
-	if len(events) != 4 || events[2].Type != "worker_patch" || events[3].Type != "verification" || len(events[3].Payload) == 0 {
-		t.Fatalf("events = %#v", events)
+	return updated.(model), root
+}
+
+func runTestGit(t *testing.T, cwd string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = cwd
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
@@ -378,6 +444,7 @@ func commandTestModel(t ...*testing.T) model {
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewCalculatorTool())
 	registry.Register(tools.NewRunVerificationCommandTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
+	registry.Register(tools.NewGitDiffTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
 	ti := textinput.New()
 	ti.Focus()
 	var store *storage.Store

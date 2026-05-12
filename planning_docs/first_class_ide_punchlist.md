@@ -82,8 +82,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Gate task dispatch on approved plans and mark selected tasks running.
 - [x] Apply patch only after path validation.
 - [x] Run configured verification commands.
-- [ ] Reviewer receives diff, test output, and task requirements.
-- [ ] Reviewer returns `approve`, `needs_fix`, or `blocked`.
+- [x] Reviewer receives diff, test output, and task requirements.
+- [x] Reviewer returns `approve`, `needs_fix`, or `blocked`.
 - [ ] On `needs_fix`, send one focused repair task back to the same worker.
 - [ ] Cap repair loops with a small limit, probably 2.
 

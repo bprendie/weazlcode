@@ -59,6 +59,11 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.runNextTask()
 	case "worker-patch":
 		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
+	case "reviewer-input":
+		m.addSystemNote(m.reviewerInputCommandText())
+		m.status = "reviewer input"
+	case "review":
+		return m.importReviewVerdict(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -133,6 +138,8 @@ func slashHelp() string {
 		"/reject [reason] - block the latest plan",
 		"/run-task - mark first pending task running and show its worker packet",
 		"/worker-patch <json> - import a worker patch or blocker for the running task",
+		"/reviewer-input - show frontier-review payload for the reviewing task",
+		"/review <json> - import a reviewer verdict for the reviewing task",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -496,6 +503,173 @@ func splitVerificationCommand(commandText string) (string, []string, error) {
 		return "", nil, fmt.Errorf("verification command is empty")
 	}
 	return fields[0], fields[1:], nil
+}
+
+func (m model) reviewerInputCommandText() string {
+	input, err := m.buildReviewerInput()
+	if err != nil {
+		return "Reviewer input error: " + err.Error()
+	}
+	return "Reviewer input:\n" + renderJSON(input)
+}
+
+func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return coding.ReviewerInput{}, err
+	}
+	if !ok {
+		return coding.ReviewerInput{}, fmt.Errorf("no plan found")
+	}
+	task, ok := firstReviewingTask(plan.Tasks)
+	if !ok {
+		return coding.ReviewerInput{}, fmt.Errorf("no reviewing task found")
+	}
+	packet, err := m.buildWorkerPacket(task)
+	if err != nil {
+		return coding.ReviewerInput{}, err
+	}
+	diff, err := m.gitDiff()
+	if err != nil {
+		return coding.ReviewerInput{}, err
+	}
+	events, err := m.store.TaskEvents(task.ID)
+	if err != nil {
+		return coding.ReviewerInput{}, err
+	}
+	return coding.ReviewerInput{
+		Plan:              plan,
+		TaskPacket:        packet,
+		Diff:              diff,
+		VerificationOut:   verificationOutputFromEvents(events),
+		TaskEventsSummary: taskEventsSummary(events),
+		Constraints: []string{
+			"Review only the current task requirements and allowed paths.",
+			"Return JSON with verdict approve, needs_fix, or blocked.",
+			"Use needs_fix for focused repairable issues; use blocked only when more context or user input is required.",
+		},
+	}, nil
+}
+
+func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
+	if raw == "" {
+		m.addSystemNote("Usage: /review <json>")
+		m.status = "review usage"
+		return m, nil, true
+	}
+	verdict, err := coding.ParseReviewVerdictJSON([]byte(raw))
+	if err != nil {
+		m.addSystemNote("Review import error: " + err.Error())
+		m.status = "review failed"
+		return m, nil, true
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Review error: " + err.Error())
+		m.status = "review failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan draft <title>` or `/plan import <json>` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	task, ok := firstReviewingTask(plan.Tasks)
+	if !ok {
+		m.addSystemNote("No reviewing task found.")
+		m.status = "no reviewing task"
+		return m, nil, true
+	}
+	payload, _ := json.Marshal(verdict)
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "reviewer_verdict",
+		Message: verdict.Summary,
+		Payload: payload,
+	})
+	switch verdict.Verdict {
+	case coding.ReviewApprove:
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusDone); err != nil {
+			m.addSystemNote("Review error: " + err.Error())
+			m.status = "review failed"
+			return m, nil, true
+		}
+		if planDoneAfterTask(plan.Tasks, task.ID) {
+			_ = m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusDone)
+		}
+		m.addSystemNote("Reviewer approved task:\n" + renderJSON(verdict))
+		m.status = "task done"
+	case coding.ReviewNeedsFix:
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Review error: " + err.Error())
+			m.status = "review failed"
+			return m, nil, true
+		}
+		m.addSystemNote("Reviewer requested fixes:\n" + renderJSON(verdict))
+		m.status = "review needs fix"
+	case coding.ReviewBlocked:
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Review error: " + err.Error())
+			m.status = "review failed"
+			return m, nil, true
+		}
+		m.addSystemNote("Reviewer blocked task:\n" + renderJSON(verdict))
+		m.status = "review blocked"
+	}
+	return m, nil, true
+}
+
+func (m model) gitDiff() (string, error) {
+	tool, ok := m.toolRegistry.Get("git_diff")
+	if !ok {
+		return "", fmt.Errorf("git_diff tool is not registered")
+	}
+	return tool.Execute(context.Background(), map[string]any{"cwd": m.project.Root})
+}
+
+func firstReviewingTask(tasks []coding.Task) (coding.Task, bool) {
+	for _, task := range tasks {
+		if task.Status == coding.TaskStatusReviewing {
+			return task, true
+		}
+	}
+	return coding.Task{}, false
+}
+
+func planDoneAfterTask(tasks []coding.Task, doneTaskID string) bool {
+	for _, task := range tasks {
+		if task.ID == doneTaskID {
+			continue
+		}
+		if task.Status != coding.TaskStatusDone {
+			return false
+		}
+	}
+	return true
+}
+
+func verificationOutputFromEvents(events []coding.TaskEvent) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "verification" && events[i].Type != "verification_error" {
+			continue
+		}
+		if len(events[i].Payload) > 0 {
+			return string(events[i].Payload)
+		}
+		return events[i].Message
+	}
+	return ""
+}
+
+func taskEventsSummary(events []coding.TaskEvent) string {
+	if len(events) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, event := range events {
+		fmt.Fprintf(&b, "- %s: %s\n", event.Type, event.Message)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {
