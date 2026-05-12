@@ -187,6 +187,62 @@ func TestSlashRejectCommand(t *testing.T) {
 	}
 }
 
+func TestSlashRunTaskRequiresApprovedPlan(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Needs approval")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	got := updated.(model)
+	if got.status != "plan not approved" {
+		t.Fatalf("status = %q, want plan not approved", got.status)
+	}
+}
+
+func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Run me")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task running" {
+		t.Fatalf("status = %q, want task running", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "running" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 2 || events[1].Type != "worker_start" || len(events[1].Payload) == 0 {
+		t.Fatalf("events = %#v", events)
+	}
+	if !strings.Contains(got.viewport.View(), `"tools_allowed"`) {
+		t.Fatalf("viewport missing worker packet: %q", got.viewport.View())
+	}
+}
+
 func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()

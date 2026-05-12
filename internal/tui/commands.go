@@ -54,6 +54,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.approveLatestPlan()
 	case "reject":
 		return m.rejectLatestPlan(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
+	case "run-task":
+		return m.runNextTask()
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -126,6 +128,7 @@ func slashHelp() string {
 		"/packet - show local-worker packet for the first pending task",
 		"/approve - approve the latest draft plan",
 		"/reject [reason] - block the latest plan",
+		"/run-task - mark first pending task running and show its worker packet",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -212,7 +215,61 @@ func (m model) packetCommandText() string {
 	if !ok {
 		return "No pending task found for packet generation."
 	}
-	packet, err := coding.BuildTaskPacket(task, coding.ContextPackOptions{
+	packet, err := m.buildWorkerPacket(task)
+	if err != nil {
+		return "Packet error: " + err.Error()
+	}
+	return "Worker task packet:\n" + renderJSON(packet)
+}
+
+func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Run task error: " + err.Error())
+		m.status = "run task failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan draft <title>` or `/plan import <json>` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if plan.Status != coding.PlanStatusApproved {
+		m.addSystemNote(fmt.Sprintf("Plan must be approved before running a task. Current status: %s", plan.Status))
+		m.status = "plan not approved"
+		return m, nil, true
+	}
+	task, ok := firstPendingTask(plan.Tasks)
+	if !ok {
+		m.addSystemNote("No pending task to run.")
+		m.status = "no pending task"
+		return m, nil, true
+	}
+	packet, err := m.buildWorkerPacket(task)
+	if err != nil {
+		m.addSystemNote("Run task error: " + err.Error())
+		m.status = "run task failed"
+		return m, nil, true
+	}
+	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusRunning); err != nil {
+		m.addSystemNote("Run task error: " + err.Error())
+		m.status = "run task failed"
+		return m, nil, true
+	}
+	payload, _ := json.Marshal(packet)
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "worker_start",
+		Message: "Task marked running; worker packet prepared for local model dispatch.",
+		Payload: payload,
+	})
+	m.addSystemNote("Worker dispatch prepared:\n" + renderJSON(packet))
+	m.status = "task running"
+	return m, nil, true
+}
+
+func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
+	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
 		DefaultAllowed: []string{
 			".",
@@ -221,19 +278,28 @@ func (m model) packetCommandText() string {
 			"go test ./...",
 		},
 	})
+}
+
+func renderJSON(v any) string {
+	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return "Packet error: " + err.Error()
+		return fmt.Sprintf("JSON render error: %v", err)
 	}
-	b, err := json.MarshalIndent(packet, "", "  ")
-	if err != nil {
-		return "Packet error: " + err.Error()
-	}
-	return "Worker task packet:\n" + string(b)
+	return string(b)
 }
 
 func firstRunnableTask(tasks []coding.Task) (coding.Task, bool) {
 	for _, task := range tasks {
 		if task.Status == coding.TaskStatusPending || task.Status == coding.TaskStatusBlocked {
+			return task, true
+		}
+	}
+	return coding.Task{}, false
+}
+
+func firstPendingTask(tasks []coding.Task) (coding.Task, bool) {
+	for _, task := range tasks {
+		if task.Status == coding.TaskStatusPending {
 			return task, true
 		}
 	}
