@@ -56,6 +56,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.rejectLatestPlan(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "run-task":
 		return m.runNextTask()
+	case "worker-patch":
+		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -129,6 +131,7 @@ func slashHelp() string {
 		"/approve - approve the latest draft plan",
 		"/reject [reason] - block the latest plan",
 		"/run-task - mark first pending task running and show its worker packet",
+		"/worker-patch <json> - import a worker patch or blocker for the running task",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -268,6 +271,96 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
+func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
+	if raw == "" {
+		m.addSystemNote("Usage: /worker-patch <json>")
+		m.status = "worker patch usage"
+		return m, nil, true
+	}
+	patch, err := coding.ParseWorkerPatchJSON([]byte(raw))
+	if err != nil {
+		m.addSystemNote("Worker patch import error: " + err.Error())
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Worker patch error: " + err.Error())
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan draft <title>` or `/plan import <json>` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	task, ok := taskByID(plan.Tasks, patch.TaskID)
+	if !ok {
+		m.addSystemNote(fmt.Sprintf("Worker patch task %q is not in the latest plan.", patch.TaskID))
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	if task.Status != coding.TaskStatusRunning {
+		m.addSystemNote(fmt.Sprintf("Task %s is %s, not running.", task.ID, task.Status))
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	if strings.TrimSpace(patch.Blocker) != "" {
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
+		payload, _ := json.Marshal(patch)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_blocker",
+			Message: patch.Blocker,
+			Payload: payload,
+		})
+		m.addSystemNote(fmt.Sprintf("Worker reported blocker for %s:\n%s", task.Title, patch.Blocker))
+		m.status = "task blocked"
+		return m, nil, true
+	}
+	paths := coding.PatchPaths(patch.Patch)
+	if err := coding.ValidatePatchPaths(paths, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
+		m.addSystemNote("Worker patch rejected: " + err.Error())
+		m.status = "worker patch rejected"
+		return m, nil, true
+	}
+	result, err := coding.ApplyPatch(m.project.Root, patch.Patch)
+	if err != nil {
+		m.addSystemNote("Worker patch apply error: " + err.Error())
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusReviewing); err != nil {
+		m.addSystemNote("Worker patch error: " + err.Error())
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	payload, _ := json.Marshal(struct {
+		Summary    string   `json:"summary"`
+		Paths      []string `json:"paths"`
+		PatchChars int      `json:"patch_chars"`
+		Output     string   `json:"output"`
+	}{
+		Summary:    patch.Summary,
+		Paths:      result.Paths,
+		PatchChars: len(patch.Patch),
+		Output:     result.Output,
+	})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "worker_patch",
+		Message: emptyFallback(patch.Summary, "Worker patch applied; task is ready for review."),
+		Payload: payload,
+	})
+	m.addSystemNote("Worker patch applied; task is ready for review:\n" + renderJSON(result))
+	m.status = "task reviewing"
+	return m, nil, true
+}
+
 func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
@@ -304,6 +397,22 @@ func firstPendingTask(tasks []coding.Task) (coding.Task, bool) {
 		}
 	}
 	return coding.Task{}, false
+}
+
+func taskByID(tasks []coding.Task, id string) (coding.Task, bool) {
+	for _, task := range tasks {
+		if task.ID == id {
+			return task, true
+		}
+	}
+	return coding.Task{}, false
+}
+
+func taskAllowedPaths(task coding.Task) []string {
+	if len(task.AllowedPaths) == 0 {
+		return []string{"."}
+	}
+	return task.AllowedPaths
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {

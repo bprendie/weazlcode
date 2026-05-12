@@ -78,9 +78,9 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Create task packet format for the worker model.
 - [x] Include goal, allowed paths, forbidden paths, relevant files, command limits, and acceptance checks.
 - [ ] Worker can request context through tools instead of receiving the whole repo.
-- [ ] Worker produces a patch, not a free-form final answer.
+- [x] Worker produces a patch, not a free-form final answer.
 - [x] Gate task dispatch on approved plans and mark selected tasks running.
-- [ ] Apply patch only after path validation.
+- [x] Apply patch only after path validation.
 - [ ] Run configured verification commands.
 - [ ] Reviewer receives diff, test output, and task requirements.
 - [ ] Reviewer returns `approve`, `needs_fix`, or `blocked`.

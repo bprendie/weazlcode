@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 
+	"github.com/bprendie/weazlcode/internal/coding"
 	"github.com/bprendie/weazlcode/internal/config"
 	"github.com/bprendie/weazlcode/internal/project"
 	"github.com/bprendie/weazlcode/internal/storage"
@@ -240,6 +243,133 @@ func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
 	}
 	if !strings.Contains(got.viewport.View(), `"tools_allowed"`) {
 		t.Fatalf("viewport missing worker packet: %q", got.viewport.View())
+	}
+}
+
+func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Needs context")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	raw, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Blocker: "Need README context"})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(raw))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task blocked" {
+		t.Fatalf("status = %q, want task blocked", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "blocked" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 3 || events[2].Type != "worker_blocker" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker patch","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+`
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Updated README", Patch: patch})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing", got.status)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new\n" {
+		t.Fatalf("README = %q, want new", data)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "reviewing" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 3 || events[2].Type != "worker_patch" || len(events[2].Payload) == 0 {
+		t.Fatalf("events = %#v", events)
 	}
 }
 

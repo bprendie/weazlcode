@@ -107,7 +107,7 @@ Run setup first if you want the guided config flow:
 
 - `enter`: send message / select session
 - `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
-- `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, and `/run-task` inspect or gate the latest plan
+- `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, and `/worker-patch` inspect or advance the latest plan
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history
 - `pgup` / `pgdown`: scroll chat history
