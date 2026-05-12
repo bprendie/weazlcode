@@ -377,6 +377,96 @@ func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	}
 }
 
+func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	raw := `{"verdict":"needs_fix","summary":"Tighten the change","issues":["Use the requested wording only"]}`
+	updated, _, handled := m.handleSlashCommand("/review " + raw)
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	m = updated.(model)
+	if m.status != "repair requested" {
+		t.Fatalf("status = %q, want repair requested", m.status)
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "blocked" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := m.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 6 || events[5].Type != "repair_requested" {
+		t.Fatalf("events = %#v", events)
+	}
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task running" {
+		t.Fatalf("status = %q, want task running", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "running" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err = got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if len(events) != 7 || events[6].Type != "repair_start" {
+		t.Fatalf("events = %#v", events)
+	}
+	if !strings.Contains(string(events[6].Payload), "Repair focus") || !strings.Contains(string(events[6].Payload), "Use the requested wording only") {
+		t.Fatalf("repair payload = %s", events[6].Payload)
+	}
+}
+
+func TestSlashReviewNeedsFixCapsRepairLoop(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	for i := 0; i < maxRepairAttempts; i++ {
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "repair_requested", Message: "existing repair"})
+	}
+	raw := `{"verdict":"needs_fix","summary":"Still wrong","issues":["No more repairs"]}`
+	updated, _, handled := m.handleSlashCommand("/review " + raw)
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	if got.status != "repair limit reached" {
+		t.Fatalf("status = %q, want repair limit reached", got.status)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "repair_limit" {
+		t.Fatalf("events = %#v", events)
+	}
+	updated, _, handled = got.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	got = updated.(model)
+	if got.status != "no runnable task" {
+		t.Fatalf("status = %q, want no runnable task", got.status)
+	}
+}
+
 func commandTestModelWithReviewingTask(t *testing.T) (model, string) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {

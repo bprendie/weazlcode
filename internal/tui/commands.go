@@ -14,6 +14,8 @@ import (
 	"github.com/bprendie/weazlcode/internal/coding"
 )
 
+const maxRepairAttempts = 2
+
 func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(input), "/") {
 		return m, nil, false
@@ -222,11 +224,14 @@ func (m model) packetCommandText() string {
 	if !ok {
 		return "No plan yet. Use `/plan draft <title>` to create a draft plan."
 	}
-	task, ok := firstRunnableTask(plan.Tasks)
+	task, ok, err := m.firstRunnableTask(plan.Tasks)
+	if err != nil {
+		return "Packet error: " + err.Error()
+	}
 	if !ok {
 		return "No pending task found for packet generation."
 	}
-	packet, err := m.buildWorkerPacket(task)
+	packet, err := m.buildWorkerPacketForRun(task)
 	if err != nil {
 		return "Packet error: " + err.Error()
 	}
@@ -250,13 +255,18 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 		m.status = "plan not approved"
 		return m, nil, true
 	}
-	task, ok := firstPendingTask(plan.Tasks)
-	if !ok {
-		m.addSystemNote("No pending task to run.")
-		m.status = "no pending task"
+	task, ok, err := m.firstRunnableTask(plan.Tasks)
+	if err != nil {
+		m.addSystemNote("Run task error: " + err.Error())
+		m.status = "run task failed"
 		return m, nil, true
 	}
-	packet, err := m.buildWorkerPacket(task)
+	if !ok {
+		m.addSystemNote("No pending or repairable task to run.")
+		m.status = "no runnable task"
+		return m, nil, true
+	}
+	packet, err := m.buildWorkerPacketForRun(task)
 	if err != nil {
 		m.addSystemNote("Run task error: " + err.Error())
 		m.status = "run task failed"
@@ -270,8 +280,8 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 	payload, _ := json.Marshal(packet)
 	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 		TaskID:  task.ID,
-		Type:    "worker_start",
-		Message: "Task marked running; worker packet prepared for local model dispatch.",
+		Type:    workerStartEventType(task),
+		Message: workerStartMessage(task),
 		Payload: payload,
 	})
 	m.addSystemNote("Worker dispatch prepared:\n" + renderJSON(packet))
@@ -448,6 +458,27 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	})
 }
 
+func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, error) {
+	packet, err := m.buildWorkerPacket(task)
+	if err != nil {
+		return coding.TaskPacket{}, err
+	}
+	if task.Status != coding.TaskStatusBlocked {
+		return packet, nil
+	}
+	events, err := m.store.TaskEvents(task.ID)
+	if err != nil {
+		return coding.TaskPacket{}, err
+	}
+	repair, ok := latestRepairRequest(events)
+	if !ok {
+		return packet, nil
+	}
+	packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\n" + repair)
+	packet.AcceptanceChecks = append(packet.AcceptanceChecks, coding.AcceptanceCheck{Description: "Reviewer needs_fix issues are addressed without broadening the task scope."})
+	return packet, nil
+}
+
 func renderJSON(v any) string {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -456,22 +487,23 @@ func renderJSON(v any) string {
 	return string(b)
 }
 
-func firstRunnableTask(tasks []coding.Task) (coding.Task, bool) {
-	for _, task := range tasks {
-		if task.Status == coding.TaskStatusPending || task.Status == coding.TaskStatusBlocked {
-			return task, true
-		}
-	}
-	return coding.Task{}, false
-}
-
-func firstPendingTask(tasks []coding.Task) (coding.Task, bool) {
+func (m model) firstRunnableTask(tasks []coding.Task) (coding.Task, bool, error) {
 	for _, task := range tasks {
 		if task.Status == coding.TaskStatusPending {
-			return task, true
+			return task, true, nil
+		}
+		if task.Status != coding.TaskStatusBlocked {
+			continue
+		}
+		events, err := m.store.TaskEvents(task.ID)
+		if err != nil {
+			return coding.Task{}, false, err
+		}
+		if repairableTask(events) {
+			return task, true, nil
 		}
 	}
-	return coding.Task{}, false
+	return coding.Task{}, false, nil
 }
 
 func taskByID(tasks []coding.Task, id string) (coding.Task, bool) {
@@ -600,13 +632,45 @@ func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 		m.addSystemNote("Reviewer approved task:\n" + renderJSON(verdict))
 		m.status = "task done"
 	case coding.ReviewNeedsFix:
+		events, err := m.store.TaskEvents(task.ID)
+		if err != nil {
+			m.addSystemNote("Review error: " + err.Error())
+			m.status = "review failed"
+			return m, nil, true
+		}
+		attempt := repairAttemptCount(events) + 1
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
 			m.status = "review failed"
 			return m, nil, true
 		}
-		m.addSystemNote("Reviewer requested fixes:\n" + renderJSON(verdict))
-		m.status = "review needs fix"
+		if attempt > maxRepairAttempts {
+			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+				TaskID:  task.ID,
+				Type:    "repair_limit",
+				Message: fmt.Sprintf("Repair limit reached after %d attempts.", maxRepairAttempts),
+			})
+			m.addSystemNote("Reviewer requested fixes, but the repair limit has been reached:\n" + renderJSON(verdict))
+			m.status = "repair limit reached"
+			return m, nil, true
+		}
+		repairPayload, _ := json.Marshal(struct {
+			Attempt int      `json:"attempt"`
+			Summary string   `json:"summary"`
+			Issues  []string `json:"issues,omitempty"`
+		}{
+			Attempt: attempt,
+			Summary: verdict.Summary,
+			Issues:  verdict.Issues,
+		})
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "repair_requested",
+			Message: repairRequestText(verdict, attempt),
+			Payload: repairPayload,
+		})
+		m.addSystemNote("Reviewer requested focused repair:\n" + renderJSON(verdict))
+		m.status = "repair requested"
 	case coding.ReviewBlocked:
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
@@ -670,6 +734,87 @@ func taskEventsSummary(events []coding.TaskEvent) string {
 		fmt.Fprintf(&b, "- %s: %s\n", event.Type, event.Message)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func repairableTask(events []coding.TaskEvent) bool {
+	if repairAttemptCount(events) >= maxRepairAttempts {
+		return false
+	}
+	repairRequested := false
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "repair_requested":
+			repairRequested = true
+			continue
+		case "repair_limit", "repair_start", "worker_patch", "worker_blocker":
+			if !repairRequested {
+				return false
+			}
+		}
+		if events[i].Type == "reviewer_verdict" {
+			verdict, ok := reviewVerdictFromEvent(events[i])
+			if !ok {
+				continue
+			}
+			return verdict.Verdict == coding.ReviewNeedsFix && repairRequested
+		}
+	}
+	return false
+}
+
+func repairAttemptCount(events []coding.TaskEvent) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == "repair_requested" {
+			count++
+		}
+	}
+	return count
+}
+
+func latestRepairRequest(events []coding.TaskEvent) (string, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "repair_requested" && strings.TrimSpace(events[i].Message) != "" {
+			return events[i].Message, true
+		}
+	}
+	return "", false
+}
+
+func reviewVerdictFromEvent(event coding.TaskEvent) (coding.ReviewVerdict, bool) {
+	if len(event.Payload) == 0 {
+		return coding.ReviewVerdict{}, false
+	}
+	var verdict coding.ReviewVerdict
+	if err := json.Unmarshal(event.Payload, &verdict); err != nil {
+		return coding.ReviewVerdict{}, false
+	}
+	return verdict, true
+}
+
+func repairRequestText(verdict coding.ReviewVerdict, attempt int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Repair attempt %d/%d: %s", attempt, maxRepairAttempts, emptyFallback(verdict.Summary, "Address reviewer issues."))
+	for _, issue := range verdict.Issues {
+		if strings.TrimSpace(issue) != "" {
+			fmt.Fprintf(&b, "\n- %s", strings.TrimSpace(issue))
+		}
+	}
+	return b.String()
+}
+
+func workerStartEventType(task coding.Task) string {
+	if task.Status == coding.TaskStatusBlocked {
+		return "repair_start"
+	}
+	return "worker_start"
+}
+
+func workerStartMessage(task coding.Task) string {
+	if task.Status == coding.TaskStatusBlocked {
+		return "Repair task marked running; worker packet prepared for local model dispatch."
+	}
+	return "Task marked running; worker packet prepared for local model dispatch."
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {

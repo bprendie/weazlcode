@@ -84,8 +84,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Run configured verification commands.
 - [x] Reviewer receives diff, test output, and task requirements.
 - [x] Reviewer returns `approve`, `needs_fix`, or `blocked`.
-- [ ] On `needs_fix`, send one focused repair task back to the same worker.
-- [ ] Cap repair loops with a small limit, probably 2.
+- [x] On `needs_fix`, send one focused repair task back to the same worker.
+- [x] Cap repair loops with a small limit, probably 2.
 
 ## Milestone 6: IDE TUI
 
