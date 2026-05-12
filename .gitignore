@@ -1,6 +1,7 @@
 /.gocache/
 /.gomodcache/
 /.weazlcode/
+/.weazlcode-smoke/
 /weazlchat
 /weazlcode
 /weazlcode-setup
