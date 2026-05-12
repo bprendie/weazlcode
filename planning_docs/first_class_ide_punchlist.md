@@ -75,8 +75,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 5: Single-Worker Loop
 
-- [ ] Create task packet format for the worker model.
-- [ ] Include goal, allowed paths, forbidden paths, relevant files, command limits, and acceptance checks.
+- [x] Create task packet format for the worker model.
+- [x] Include goal, allowed paths, forbidden paths, relevant files, command limits, and acceptance checks.
 - [ ] Worker can request context through tools instead of receiving the whole repo.
 - [ ] Worker produces a patch, not a free-form final answer.
 - [ ] Apply patch only after path validation.

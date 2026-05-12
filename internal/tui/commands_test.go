@@ -87,6 +87,24 @@ func TestSlashPlanDraftCommand(t *testing.T) {
 	}
 }
 
+func TestSlashPacketCommand(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Add packet")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/packet")
+	if !handled {
+		t.Fatal("packet handled = false")
+	}
+	got := updated.(model)
+	view := got.viewport.View()
+	if !strings.Contains(view, `"tools_allowed"`) || !strings.Contains(view, `"apply_patch"`) {
+		t.Fatalf("viewport missing packet JSON: %q", view)
+	}
+}
+
 func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()

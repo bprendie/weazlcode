@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -46,6 +47,9 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "tasks":
 		m.addSystemNote(m.tasksCommandText())
 		m.status = "task list"
+	case "packet":
+		m.addSystemNote(m.packetCommandText())
+		m.status = "task packet"
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -114,6 +118,7 @@ func slashHelp() string {
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/tasks - list latest plan tasks",
+		"/packet - show local-worker packet for the first pending task",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -122,6 +127,46 @@ func slashHelp() string {
 		"/copy - release mouse for terminal selection",
 		"/mouse - restore mouse scrolling",
 	}, "\n")
+}
+
+func (m model) packetCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Packet error: " + err.Error()
+	}
+	if !ok {
+		return "No plan yet. Use `/plan draft <title>` to create a draft plan."
+	}
+	task, ok := firstRunnableTask(plan.Tasks)
+	if !ok {
+		return "No pending task found for packet generation."
+	}
+	packet, err := coding.BuildTaskPacket(task, coding.ContextPackOptions{
+		ProjectRoot: m.project.Root,
+		DefaultAllowed: []string{
+			".",
+		},
+		DefaultVerify: []string{
+			"go test ./...",
+		},
+	})
+	if err != nil {
+		return "Packet error: " + err.Error()
+	}
+	b, err := json.MarshalIndent(packet, "", "  ")
+	if err != nil {
+		return "Packet error: " + err.Error()
+	}
+	return "Worker task packet:\n" + string(b)
+}
+
+func firstRunnableTask(tasks []coding.Task) (coding.Task, bool) {
+	for _, task := range tasks {
+		if task.Status == coding.TaskStatusPending || task.Status == coding.TaskStatusBlocked {
+			return task, true
+		}
+	}
+	return coding.Task{}, false
 }
 
 func (m model) handlePlanCommand(args []string) (tea.Model, tea.Cmd, bool) {
