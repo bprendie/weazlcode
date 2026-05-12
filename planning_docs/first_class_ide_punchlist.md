@@ -62,14 +62,14 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 4: Structured Plans
 
-- [ ] Add `internal/coding`.
-- [ ] Define `Plan`, `Task`, `AcceptanceCheck`, and `ReviewVerdict` structs.
+- [x] Add `internal/coding`.
+- [x] Define `Plan`, `Task`, `AcceptanceCheck`, and `ReviewVerdict` structs.
 - [ ] Add JSON schema or strict parser for orchestrator-produced plans.
-- [ ] Store plans and tasks in SQLite.
-- [ ] Add plan status values: `draft`, `approved`, `running`, `blocked`, `reviewing`, `done`.
-- [ ] Add a plan view in the TUI.
+- [x] Store plans and tasks in SQLite.
+- [x] Add plan status values: `draft`, `approved`, `running`, `blocked`, `done`, plus task `reviewing`.
+- [x] Add local `/plan` and `/tasks` commands in the TUI.
 - [ ] Add user approval before the first worker task runs.
-- [ ] Add task event history for model runs, tool calls, file edits, and checks.
+- [x] Add task event history for model runs, tool calls, file edits, and checks.
 
 ## Milestone 5: Single-Worker Loop
 

@@ -4,8 +4,12 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
+
+	"github.com/bprendie/weazlcode/internal/coding"
 )
 
 func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
@@ -37,6 +41,11 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "tools":
 		m.addSystemNote("Tools:\n" + strings.Join(m.getToolNames(), "\n"))
 		m.status = "tool list"
+	case "plan":
+		return m.handlePlanCommand(fields[1:])
+	case "tasks":
+		m.addSystemNote(m.tasksCommandText())
+		m.status = "task list"
 	case "sessions":
 		return m.showSessionsWithInputCleared()
 	case "workspaces", "workspace":
@@ -102,6 +111,9 @@ func slashHelp() string {
 		"/project - show active project",
 		"/models - show model role mapping",
 		"/tools - list enabled tools",
+		"/plan - show latest plan",
+		"/plan draft <title> - create a draft plan with one seed task",
+		"/tasks - list latest plan tasks",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -110,6 +122,106 @@ func slashHelp() string {
 		"/copy - release mouse for terminal selection",
 		"/mouse - restore mouse scrolling",
 	}, "\n")
+}
+
+func (m model) handlePlanCommand(args []string) (tea.Model, tea.Cmd, bool) {
+	if len(args) > 0 && strings.ToLower(args[0]) == "draft" {
+		title := strings.TrimSpace(strings.Join(args[1:], " "))
+		if title == "" {
+			title = "Draft coding plan"
+		}
+		plan := coding.Plan{
+			ID:          uuid.NewString(),
+			SessionID:   m.session.ID,
+			ProjectRoot: m.project.Root,
+			Title:       title,
+			Summary:     "Manual draft plan. Replace this with orchestrator-generated steps in the next phase increment.",
+			Status:      coding.PlanStatusDraft,
+			Tasks: []coding.Task{
+				{
+					ID:     uuid.NewString(),
+					Title:  "Define implementation steps",
+					Goal:   title,
+					Status: coding.TaskStatusPending,
+					AcceptanceChecks: []coding.AcceptanceCheck{
+						{Description: "Plan is reviewed and approved before worker execution."},
+					},
+				},
+			},
+		}
+		plan.Tasks[0].PlanID = plan.ID
+		if err := m.store.SavePlan(plan); err != nil {
+			m.err = err.Error()
+			return m, nil, true
+		}
+		if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+			plan = saved
+		}
+		m.addSystemNote(renderPlan(plan))
+		m.status = "draft plan created"
+		return m, nil, true
+	}
+	m.addSystemNote(m.planCommandText())
+	m.status = "latest plan"
+	return m, nil, true
+}
+
+func (m model) planCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Plan error: " + err.Error()
+	}
+	if !ok {
+		return "No plan yet. Use `/plan draft <title>` to create one."
+	}
+	return renderPlan(plan)
+}
+
+func (m model) tasksCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Task error: " + err.Error()
+	}
+	if !ok {
+		return "No plan tasks yet. Use `/plan draft <title>` to create a draft plan."
+	}
+	if len(plan.Tasks) == 0 {
+		return "Plan has no tasks."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Tasks for %s:\n", plan.Title)
+	for i, task := range plan.Tasks {
+		fmt.Fprintf(&b, "%d. [%s] %s\n   %s\n", i+1, task.Status, task.Title, task.Goal)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderPlan(plan coding.Plan) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Plan: %s\nstatus: %s\nid: %s\nupdated: %s\n\n%s",
+		plan.Title,
+		plan.Status,
+		plan.ID,
+		plan.UpdatedAt.Format(time.RFC3339),
+		plan.Summary,
+	)
+	if len(plan.Tasks) > 0 {
+		b.WriteString("\n\nTasks:")
+		for i, task := range plan.Tasks {
+			fmt.Fprintf(&b, "\n%d. [%s] %s\n   %s", i+1, task.Status, task.Title, task.Goal)
+			if len(task.AcceptanceChecks) > 0 {
+				b.WriteString("\n   checks:")
+				for _, check := range task.AcceptanceChecks {
+					label := check.Description
+					if label == "" {
+						label = check.Command
+					}
+					fmt.Fprintf(&b, "\n   - %s", label)
+				}
+			}
+		}
+	}
+	return b.String()
 }
 
 func (m model) projectCommandText() string {

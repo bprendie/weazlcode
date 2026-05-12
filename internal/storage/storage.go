@@ -131,10 +131,45 @@ func (s *Store) Migrate() error {
 			summary text not null,
 			created_at datetime not null default current_timestamp
 		)`,
+		`create table if not exists plans (
+			id text primary key,
+			session_id text not null references sessions(id) on delete cascade,
+			project_root text not null default '',
+			title text not null,
+			summary text not null,
+			status text not null,
+			created_at datetime not null default current_timestamp,
+			updated_at datetime not null default current_timestamp
+		)`,
+		`create table if not exists tasks (
+			id text primary key,
+			plan_id text not null references plans(id) on delete cascade,
+			title text not null,
+			goal text not null,
+			status text not null,
+			allowed_paths text not null default '[]',
+			forbidden_paths text not null default '[]',
+			context_files text not null default '[]',
+			verification text not null default '[]',
+			acceptance_checks text not null default '[]',
+			created_at datetime not null default current_timestamp,
+			updated_at datetime not null default current_timestamp
+		)`,
+		`create table if not exists task_events (
+			id integer primary key autoincrement,
+			task_id text not null references tasks(id) on delete cascade,
+			type text not null,
+			message text not null,
+			payload text,
+			created_at datetime not null default current_timestamp
+		)`,
 		`create index if not exists idx_messages_session on messages(session_id, id)`,
 		`create index if not exists idx_sessions_updated on sessions(updated_at desc)`,
 		`create index if not exists idx_memories_updated on memories(updated_at desc)`,
 		`create index if not exists idx_context_checkpoints_session on context_checkpoints(session_id, id desc)`,
+		`create index if not exists idx_plans_session on plans(session_id, updated_at desc)`,
+		`create index if not exists idx_tasks_plan on tasks(plan_id, created_at)`,
+		`create index if not exists idx_task_events_task on task_events(task_id, id)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {

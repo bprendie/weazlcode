@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -9,6 +10,7 @@ import (
 
 	"github.com/bprendie/weazlcode/internal/config"
 	"github.com/bprendie/weazlcode/internal/project"
+	"github.com/bprendie/weazlcode/internal/storage"
 	"github.com/bprendie/weazlcode/internal/tools"
 )
 
@@ -63,20 +65,60 @@ func TestNonSlashCommandNotHandled(t *testing.T) {
 	}
 }
 
-func commandTestModel() model {
+func TestSlashPlanDraftCommand(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Add planner")
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	got := updated.(model)
+	if got.status != "draft plan created" {
+		t.Fatalf("status = %q, want draft plan created", got.status)
+	}
+	if !strings.Contains(got.viewport.View(), "Plan: Add planner") {
+		t.Fatalf("viewport missing plan: %q", got.viewport.View())
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Title != "Add planner" || len(plan.Tasks) != 1 {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+}
+
+func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewCalculatorTool())
 	ti := textinput.New()
 	ti.Focus()
+	var store *storage.Store
+	session := storage.Session{ID: "session-1", Title: "New session", Provider: "local-vllm", Model: "local-model", ProjectRoot: "/tmp/weazlcode"}
+	if len(t) > 0 && t[0] != nil {
+		var err error
+		store, err = storage.Open(filepath.Join(t[0].TempDir(), "test.sqlite3"))
+		if err != nil {
+			t[0].Fatal(err)
+		}
+		t[0].Cleanup(func() { _ = store.Close() })
+		if err := store.Migrate(); err != nil {
+			t[0].Fatal(err)
+		}
+		if err := store.CreateProjectSession(session.ID, session.Title, session.Provider, session.Model, session.ProjectRoot); err != nil {
+			t[0].Fatal(err)
+		}
+	}
 	return model{
 		cfg:          cfg,
 		project:      project.Summary{Root: "/tmp/weazlcode", GitRoot: true, Branch: "main", Dirty: true, StateDir: "/tmp/weazlcode/.weazlcode", LogDir: "/tmp/weazlcode/.weazlcode/logs", Languages: []string{"go"}, FileCount: 42},
+		store:        store,
 		toolRegistry: registry,
 		styles:       newStyles(),
 		mode:         modeChat,
 		input:        ti,
 		viewport:     viewport.New(80, 20),
 		mouseScroll:  true,
+		session:      session,
 	}
 }
