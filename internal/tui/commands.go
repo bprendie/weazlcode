@@ -228,6 +228,7 @@ func slashHelp() string {
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/plan generate <request> - ask orchestrator role for a strict draft plan",
 		"/plan edit <task> <field> <value> - edit draft task fields before approval",
+		"/plan validate - check draft task specificity before approval",
 		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
 		"/task [n|id] - show task detail, packet, events, and review state",
@@ -256,7 +257,7 @@ func commandPaletteText() string {
 		Title    string
 		Commands []string
 	}{
-		{"Plan", []string{"/plan", "/plan generate <request>", "/plan edit <task> <field> <value>", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
+		{"Plan", []string{"/plan", "/plan generate <request>", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
 		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
@@ -291,6 +292,11 @@ func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
 		m.status = "plan not draft"
 		return m, nil, true
 	}
+	if issues := coding.ValidatePlanQuality(plan); len(issues) > 0 {
+		m.addSystemNote("Plan quality check failed:\n" + renderPlanQualityIssues(issues) + "\n\nUse `/plan edit`, `/attach`, or `/plan validate` before approving.")
+		m.status = "approval blocked"
+		return m, nil, true
+	}
 	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
 		m.addSystemNote("Approve error: " + err.Error())
 		m.status = "approve failed"
@@ -307,6 +313,36 @@ func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
 	m.addSystemNote(renderPlan(plan))
 	m.status = "plan approved"
 	return m, nil, true
+}
+
+func (m model) planValidationCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Plan validation error: " + err.Error()
+	}
+	if !ok {
+		return "No plan. Use `/plan draft`, `/plan generate`, or `/plan import` first."
+	}
+	issues := coding.ValidatePlanQuality(plan)
+	if len(issues) == 0 {
+		return "Plan validation passed.\n\n" + renderPlan(plan)
+	}
+	return "Plan validation failed:\n" + renderPlanQualityIssues(issues)
+}
+
+func renderPlanQualityIssues(issues []coding.PlanQualityIssue) string {
+	var b strings.Builder
+	for i, issue := range issues {
+		title := strings.TrimSpace(issue.TaskTitle)
+		if title == "" {
+			title = strings.TrimSpace(issue.TaskID)
+		}
+		if title == "" {
+			title = "plan"
+		}
+		fmt.Fprintf(&b, "%d. [%s] %s: %s\n", i+1, issue.Severity, title, issue.Message)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) rejectLatestPlan(reason string) (tea.Model, tea.Cmd, bool) {
@@ -1694,6 +1730,10 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 	if len(args) > 0 && strings.ToLower(args[0]) == "edit" {
 		return m.editPlanCommand(strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0])))
 	}
+	if len(args) > 0 && strings.ToLower(args[0]) == "validate" {
+		m.setIDEView("plan validation", m.planValidationCommandText())
+		return m, nil, true
+	}
 	if len(args) > 0 && strings.ToLower(args[0]) == "draft" {
 		title := strings.TrimSpace(strings.Join(args[1:], " "))
 		if title == "" {
@@ -2087,6 +2127,9 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
+				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
+				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
+				"Every task must include concrete acceptance_checks that can be reviewed against the diff.",
 				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
 				"If no allowlisted verification applies, leave verification empty.",
 			}, "\n"),
@@ -2107,6 +2150,7 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
+				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for one bounded worker task.",
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
 			}, "\n"),
 		},

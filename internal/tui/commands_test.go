@@ -433,9 +433,10 @@ func TestSlashPlanEditCommandUpdatesDraftTask(t *testing.T) {
 
 func TestSlashPlanEditCommandRequiresDraftPlan(t *testing.T) {
 	m := commandTestModel(t)
-	updated, _, handled := m.handleSlashCommand("/plan draft Locked")
+	raw := `{"title":"Locked","summary":"Lock plan","tasks":[{"title":"Update README","goal":"Update README.md to document the locked plan behavior.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents locked plan behavior"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
-		t.Fatal("plan draft handled = false")
+		t.Fatal("plan import handled = false")
 	}
 	m = updated.(model)
 	updated, _, handled = m.handleSlashCommand("/approve")
@@ -455,7 +456,8 @@ func TestSlashPlanEditCommandRequiresDraftPlan(t *testing.T) {
 
 func TestSlashApproveCommand(t *testing.T) {
 	m := commandTestModel(t)
-	updated, _, handled := m.handleSlashCommand("/plan draft Approve me")
+	raw := `{"title":"Approve me","summary":"Approve plan","tasks":[{"title":"Update README","goal":"Update README.md to document the approval workflow.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents the approval workflow"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
 		t.Fatal("plan handled = false")
 	}
@@ -481,6 +483,43 @@ func TestSlashApproveCommand(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != "approval" {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSlashApproveBlocksLowQualityPlan(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Approve me")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	got := updated.(model)
+	if got.status != "approval blocked" {
+		t.Fatalf("status = %q, want approval blocked", got.status)
+	}
+	if !strings.Contains(got.viewport.View(), "Plan quality check failed") || !strings.Contains(got.viewport.View(), "allowed_paths is empty") {
+		t.Fatalf("viewport missing quality warning: %q", got.viewport.View())
+	}
+}
+
+func TestSlashPlanValidateCommand(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Validate me")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/plan validate")
+	if !handled {
+		t.Fatal("plan validate handled = false")
+	}
+	got := updated.(model)
+	if got.status != "view plan validation" || !strings.Contains(got.viewport.View(), "Plan validation failed") {
+		t.Fatalf("status/view = %q/%q", got.status, got.viewport.View())
 	}
 }
 
@@ -534,7 +573,8 @@ func TestSlashRunTaskRequiresApprovedPlan(t *testing.T) {
 
 func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
 	m := commandTestModel(t)
-	updated, _, handled := m.handleSlashCommand("/plan draft Run me")
+	raw := `{"title":"Run me","summary":"Run task","tasks":[{"title":"Update README","goal":"Update README.md to document the worker packet flow.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents the worker packet flow"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
 		t.Fatal("plan handled = false")
 	}
@@ -629,7 +669,8 @@ func TestRunWorkerRequiresRunningTask(t *testing.T) {
 
 func TestRunWorkerStartsAsync(t *testing.T) {
 	m := commandTestModel(t)
-	updated, _, handled := m.handleSlashCommand("/plan draft Async worker")
+	raw := `{"title":"Async worker","summary":"Run async worker","tasks":[{"title":"Update README","goal":"Update README.md to document asynchronous worker dispatch.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents asynchronous worker dispatch"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
 		t.Fatal("plan handled = false")
 	}
@@ -689,7 +730,8 @@ func TestStaleModelMessagesAreIgnored(t *testing.T) {
 
 func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 	m := commandTestModel(t)
-	updated, _, handled := m.handleSlashCommand("/plan draft Needs context")
+	rawPlan := `{"title":"Needs context","summary":"Block task","tasks":[{"title":"Update README","goal":"Update README.md to document blocker handling.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents blocker handling"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
 	if !handled {
 		t.Fatal("plan handled = false")
 	}
