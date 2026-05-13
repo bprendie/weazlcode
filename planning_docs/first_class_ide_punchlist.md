@@ -193,8 +193,8 @@ Goal: make the single-worker loop harder to misuse by tightening setup validatio
 - [x] Make reviewer checks compare task goal, allowed paths, diff, verification output, and acceptance checks more mechanically.
 - [x] Block or flag approvals when a diff is plausible but unrelated to the task.
 - [x] Store clearer reviewer rationale in task events and run artifacts.
-- [ ] Run a live smoke matrix for local worker plus planning LLM, same endpoint for all roles, and none/local fallback.
-- [ ] Document Phase 4 smoke results and remaining reliability gaps.
+- [x] Run a live smoke matrix for local worker plus planning LLM, same endpoint for all roles, and none/local fallback.
+- [x] Document Phase 4 smoke results and remaining reliability gaps.
 
 ## Later Extensions
 
