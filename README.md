@@ -2,7 +2,11 @@
 
 > Work in progress: WeazlCode currently starts from the WeazlChat codebase and is being reshaped into a first-class local-first AI coding IDE.
 
-![WeazlCode screenshot](weazlcode.png)
+<p align="center">
+  <img src="weazlcode.png" alt="WeazlCode terminal IDE screenshot" width="960">
+</p>
+
+<p align="center"><em>WeazlCode running as a terminal IDE with project status, context telemetry, slash commands, and an active coding session.</em></p>
 
 WeazlCode is a private, local-first AI coding TUI built from the WeazlChat foundation. The first cut keeps the straightforward vLLM/Ollama chat workflow intact while the project grows toward a coding platform where frontier models plan and review, and local models handle bounded implementation work.
 
