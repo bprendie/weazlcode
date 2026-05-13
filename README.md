@@ -119,7 +119,7 @@ That writes `WEAZLCODE.md`, which is the primary WeazlCode instruction file. Exi
 
 - `enter`: send message / select session
 - `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/files`, `/preview`, `/lsp`, `/diagnostics`, `/symbols`, `/definition`, `/references`, `/instructions`, `/memory`, `/final-review`, `/commit-message`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
-- `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/worker-patch`, `/reviewer-input`, `/review`, `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` inspect or advance the latest plan
+- `/plan draft <title>` / `/plan import <json>` / `/plan generate <request>`: create or generate a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/run-worker`, `/worker-patch`, `/reviewer-input`, `/review`, `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` inspect or advance the latest plan
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history
 - `pgup` / `pgdown`: scroll chat history
@@ -249,9 +249,9 @@ Tool calls are logged as JSONL under `.weazlcode/logs/tool_calls.jsonl` for proj
 WeazlCode now has the first full single-worker coding loop:
 
 1. Frontier-capable orchestrator context includes `WEAZLCODE.md` or fallback `AGENTS.md`, discovered project commands, project memory, and the current session.
-2. `/plan draft` or `/plan import` creates a structured plan, and `/approve` gates worker execution.
+2. `/plan draft`, `/plan import`, or `/plan generate` creates a structured plan, and `/approve` gates worker execution.
 3. `/packet` and `/run-task` create bounded worker task packets with allowed paths, diagnostics, verification commands, approved tools, and a context policy that tells local workers to request missing context through `read_file`, `read_file_range`, or `search_files`.
-4. `/worker-patch` imports a patch or blocker. Patches are path-validated, applied, verified, and moved to review.
+4. `/run-worker` asks the configured worker role for a `WorkerPatch` JSON response; `/worker-patch` can still manually import a patch or blocker. Patches are path-validated, applied, verified, and moved to review.
 5. `/reviewer-input` prepares the frontier review payload. `/review` accepts `approve`, `needs_fix`, or `blocked`, with capped repair loops.
 6. `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` cover the final review and commit artifact workflow.
 

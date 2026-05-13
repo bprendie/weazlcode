@@ -24,9 +24,10 @@ type Manager struct {
 }
 
 type Server struct {
-	Language  string `json:"language"`
-	Command   string `json:"command"`
-	Available bool   `json:"available"`
+	Language  string   `json:"language"`
+	Command   string   `json:"command"`
+	Args      []string `json:"args,omitempty"`
+	Available bool     `json:"available"`
 }
 
 type Process struct {
@@ -64,7 +65,15 @@ func (m Manager) DetectServers() []Server {
 	var servers []Server
 	if m.hasGo() {
 		_, err := exec.LookPath("gopls")
-		servers = append(servers, Server{Language: "go", Command: "gopls", Available: err == nil})
+		servers = append(servers, Server{Language: "go", Command: "gopls", Args: []string{"serve"}, Available: err == nil})
+	}
+	if m.hasJavaScriptTypeScript() {
+		_, err := exec.LookPath("typescript-language-server")
+		servers = append(servers, Server{Language: "javascript/typescript", Command: "typescript-language-server", Args: []string{"--stdio"}, Available: err == nil})
+	}
+	if m.hasPython() {
+		_, err := exec.LookPath("pyright-langserver")
+		servers = append(servers, Server{Language: "python", Command: "pyright-langserver", Args: []string{"--stdio"}, Available: err == nil})
 	}
 	return servers
 }
@@ -76,7 +85,10 @@ func (m Manager) Start(ctx context.Context, server Server) (*Process, error) {
 	if _, err := exec.LookPath(server.Command); err != nil {
 		return nil, err
 	}
-	args := []string{"serve"}
+	args := server.Args
+	if len(args) == 0 && server.Command == "gopls" {
+		args = []string{"serve"}
+	}
 	cmd := exec.CommandContext(ctx, server.Command, args...)
 	cmd.Dir = m.ProjectRoot
 	if err := cmd.Start(); err != nil {
@@ -96,7 +108,7 @@ func (p *Process) Stop() error {
 }
 
 func (m Manager) Diagnostics(ctx context.Context) ([]Diagnostic, error) {
-	files, err := goFiles(m.ProjectRoot)
+	files, err := sourceFiles(m.ProjectRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -110,22 +122,26 @@ func (m Manager) Diagnostics(ctx context.Context) ([]Diagnostic, error) {
 		if err != nil {
 			continue
 		}
-		fset := token.NewFileSet()
-		if _, err := parser.ParseFile(fset, full, src, parser.AllErrors); err != nil {
-			if list, ok := err.(scanner.ErrorList); ok {
-				for _, item := range list {
-					diagnostics = append(diagnostics, parseDiagnostic(m.ProjectRoot, item))
+		if strings.HasSuffix(rel, ".go") {
+			fset := token.NewFileSet()
+			if _, err := parser.ParseFile(fset, full, src, parser.AllErrors); err != nil {
+				if list, ok := err.(scanner.ErrorList); ok {
+					for _, item := range list {
+						diagnostics = append(diagnostics, parseDiagnostic(m.ProjectRoot, item))
+					}
+					continue
 				}
-				continue
+				diagnostics = append(diagnostics, Diagnostic{File: rel, Severity: "error", Message: err.Error(), Source: "go/parser"})
 			}
-			diagnostics = append(diagnostics, Diagnostic{File: rel, Severity: "error", Message: err.Error(), Source: "go/parser"})
+			continue
 		}
+		diagnostics = append(diagnostics, balancedDelimiterDiagnostics(rel, string(src))...)
 	}
 	return diagnostics, nil
 }
 
 func (m Manager) Symbols(ctx context.Context, query string) ([]Symbol, error) {
-	files, err := goFiles(m.ProjectRoot)
+	files, err := sourceFiles(m.ProjectRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -135,29 +151,36 @@ func (m Manager) Symbols(ctx context.Context, query string) ([]Symbol, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		full := filepath.Join(m.ProjectRoot, rel)
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, full, nil, 0)
-		if err != nil {
-			continue
-		}
-		for _, decl := range file.Decls {
-			switch d := decl.(type) {
-			case *ast.FuncDecl:
-				addSymbol(&symbols, fset, rel, d.Name.Name, "func", d.Pos(), query)
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					switch s := spec.(type) {
-					case *ast.TypeSpec:
-						addSymbol(&symbols, fset, rel, s.Name.Name, "type", s.Pos(), query)
-					case *ast.ValueSpec:
-						kind := strings.ToLower(d.Tok.String())
-						for _, name := range s.Names {
-							addSymbol(&symbols, fset, rel, name.Name, kind, name.Pos(), query)
+		if strings.HasSuffix(rel, ".go") {
+			full := filepath.Join(m.ProjectRoot, rel)
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, full, nil, 0)
+			if err != nil {
+				continue
+			}
+			for _, decl := range file.Decls {
+				switch d := decl.(type) {
+				case *ast.FuncDecl:
+					addSymbol(&symbols, fset, rel, d.Name.Name, "func", d.Pos(), query)
+				case *ast.GenDecl:
+					for _, spec := range d.Specs {
+						switch s := spec.(type) {
+						case *ast.TypeSpec:
+							addSymbol(&symbols, fset, rel, s.Name.Name, "type", s.Pos(), query)
+						case *ast.ValueSpec:
+							kind := strings.ToLower(d.Tok.String())
+							for _, name := range s.Names {
+								addSymbol(&symbols, fset, rel, name.Name, kind, name.Pos(), query)
+							}
 						}
 					}
 				}
 			}
+			continue
+		}
+		textSymbols, err := textFileSymbols(filepath.Join(m.ProjectRoot, rel), rel, query)
+		if err == nil {
+			symbols = append(symbols, textSymbols...)
 		}
 	}
 	sort.Slice(symbols, func(i, j int) bool {
@@ -183,7 +206,7 @@ func (m Manager) Definition(ctx context.Context, name string) (Symbol, bool, err
 }
 
 func (m Manager) References(ctx context.Context, name string) ([]Reference, error) {
-	files, err := goFiles(m.ProjectRoot)
+	files, err := sourceFiles(m.ProjectRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +245,46 @@ func (m Manager) hasGo() bool {
 	return len(files) > 0
 }
 
+func (m Manager) hasJavaScriptTypeScript() bool {
+	for _, lang := range m.Languages {
+		if lang == "javascript/typescript" || lang == "javascript" || lang == "typescript" {
+			return true
+		}
+	}
+	for _, rel := range []string{"package.json", "tsconfig.json", "jsconfig.json"} {
+		if _, err := os.Stat(filepath.Join(m.ProjectRoot, rel)); err == nil {
+			return true
+		}
+	}
+	files, _ := sourceFiles(m.ProjectRoot)
+	for _, file := range files {
+		if isJavaScriptTypeScript(file) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Manager) hasPython() bool {
+	for _, lang := range m.Languages {
+		if lang == "python" {
+			return true
+		}
+	}
+	for _, rel := range []string{"pyproject.toml", "setup.py", "requirements.txt"} {
+		if _, err := os.Stat(filepath.Join(m.ProjectRoot, rel)); err == nil {
+			return true
+		}
+	}
+	files, _ := sourceFiles(m.ProjectRoot)
+	for _, file := range files {
+		if strings.HasSuffix(file, ".py") {
+			return true
+		}
+	}
+	return false
+}
+
 func addSymbol(symbols *[]Symbol, fset *token.FileSet, rel, name, kind string, pos token.Pos, query string) {
 	if query != "" && !strings.Contains(strings.ToLower(name), query) {
 		return
@@ -231,6 +294,20 @@ func addSymbol(symbols *[]Symbol, fset *token.FileSet, rel, name, kind string, p
 }
 
 func goFiles(root string) ([]string, error) {
+	files, err := sourceFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	out := files[:0]
+	for _, file := range files {
+		if strings.HasSuffix(file, ".go") {
+			out = append(out, file)
+		}
+	}
+	return out, nil
+}
+
+func sourceFiles(root string) ([]string, error) {
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -251,13 +328,26 @@ func goFiles(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if strings.HasSuffix(rel, ".go") {
+		if isSourceFile(rel) {
 			files = append(files, rel)
 		}
 		return nil
 	})
 	sort.Strings(files)
 	return files, err
+}
+
+func isSourceFile(rel string) bool {
+	return strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, ".py") || isJavaScriptTypeScript(rel)
+}
+
+func isJavaScriptTypeScript(rel string) bool {
+	for _, ext := range []string{".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"} {
+		if strings.HasSuffix(rel, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsIdent(line, name string) bool {
@@ -279,6 +369,104 @@ func containsIdent(line, name string) bool {
 		}
 		start = after
 	}
+}
+
+func textFileSymbols(path, rel, query string) ([]Symbol, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	query = strings.ToLower(strings.TrimSpace(query))
+	var symbols []Symbol
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		name, kind, ok := textSymbol(line, rel)
+		if !ok {
+			continue
+		}
+		if query != "" && !strings.Contains(strings.ToLower(name), query) {
+			continue
+		}
+		symbols = append(symbols, Symbol{Name: name, Kind: kind, File: rel, Line: lineNo})
+	}
+	return symbols, scanner.Err()
+}
+
+func textSymbol(line, rel string) (string, string, bool) {
+	switch {
+	case strings.HasSuffix(rel, ".py"):
+		if rest, ok := strings.CutPrefix(line, "def "); ok {
+			return identBefore(rest, "("), "func", true
+		}
+		if rest, ok := strings.CutPrefix(line, "async def "); ok {
+			return identBefore(rest, "("), "func", true
+		}
+		if rest, ok := strings.CutPrefix(line, "class "); ok {
+			return identBefore(rest, "(: "), "type", true
+		}
+	case isJavaScriptTypeScript(rel):
+		for _, prefix := range []string{"export function ", "function "} {
+			if rest, ok := strings.CutPrefix(line, prefix); ok {
+				return identBefore(rest, "("), "func", true
+			}
+		}
+		for _, prefix := range []string{"export class ", "class "} {
+			if rest, ok := strings.CutPrefix(line, prefix); ok {
+				return identBefore(rest, " {<("), "type", true
+			}
+		}
+		for _, prefix := range []string{"export const ", "const ", "let ", "var "} {
+			if rest, ok := strings.CutPrefix(line, prefix); ok {
+				return identBefore(rest, " =:("), "var", true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func identBefore(s, stops string) string {
+	for i, r := range s {
+		if strings.ContainsRune(stops, r) || unicode.IsSpace(r) {
+			return strings.TrimSpace(s[:i])
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+func balancedDelimiterDiagnostics(rel, content string) []Diagnostic {
+	type openDelim struct {
+		ch     rune
+		line   int
+		column int
+	}
+	pairs := map[rune]rune{')': '(', ']': '[', '}': '{'}
+	var stack []openDelim
+	line, column := 1, 0
+	for _, r := range content {
+		if r == '\n' {
+			line++
+			column = 0
+			continue
+		}
+		column++
+		switch r {
+		case '(', '[', '{':
+			stack = append(stack, openDelim{ch: r, line: line, column: column})
+		case ')', ']', '}':
+			if len(stack) == 0 || stack[len(stack)-1].ch != pairs[r] {
+				return []Diagnostic{{File: rel, Line: line, Column: column, Severity: "error", Message: fmt.Sprintf("unmatched %q", r), Source: "weazlcode/fallback"}}
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	if len(stack) == 0 {
+		return nil
+	}
+	item := stack[len(stack)-1]
+	return []Diagnostic{{File: rel, Line: item.line, Column: item.column, Severity: "error", Message: fmt.Sprintf("unclosed %q", item.ch), Source: "weazlcode/fallback"}}
 }
 
 func isIdentRune(r rune) bool {

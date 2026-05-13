@@ -139,9 +139,10 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add `/plan generate <request>` backed by orchestrator role calls and strict parser validation.
 - [x] Smoke-test `/plan generate` through the TUI with a runtime vLLM-compatible config.
 - [x] Add one-shot repair handling for invalid `/plan generate` JSON.
-- [ ] Exercise the single-worker loop against local Ollama/vLLM models.
+- [x] Add model-backed `/run-worker` dispatch for the configured worker role.
+- [x] Exercise the single-worker loop against local Ollama/vLLM models.
 - [x] Use frontier planner/reviewer roles on an API-compatible endpoint.
-- [ ] Expand LSP support beyond the current Go-first foundation.
+- [x] Expand LSP support beyond the current Go-first foundation.
 
 ## Later Extensions
 
@@ -155,7 +156,6 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Exercise the single-worker loop against local Ollama/vLLM models.
-2. Expand LSP support beyond the current Go-first foundation.
-3. Move `/plan generate` onto an async command path with progress state and cancellation.
-4. Keep parallel workers in Later Extensions until single-worker reliability is proven.
+1. Add worker patch repair for invalid model-produced diffs.
+2. Move `/plan generate` and `/run-worker` onto async command paths with progress state and cancellation.
+3. Keep parallel workers in Later Extensions until single-worker reliability is proven.

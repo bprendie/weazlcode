@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -376,6 +377,47 @@ func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
 	}
 	if !strings.Contains(got.viewport.View(), `"tools_allowed"`) {
 		t.Fatalf("viewport missing worker packet: %q", got.viewport.View())
+	}
+}
+
+func TestWorkerPatchMessages(t *testing.T) {
+	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, ToolsAllowed: []string{"apply_patch"}}
+	messages := workerPatchMessages(packet)
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "unified diff", `"task_id": "task-1"`, "README.md"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("worker messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
+func TestWorkerPatchRepairMessages(t *testing.T) {
+	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, ToolsAllowed: []string{"apply_patch"}}
+	raw := "This task is done."
+	messages := workerPatchRepairMessages(packet, raw, errors.New("bad worker json"))
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"repair WeazlCode WorkerPatch", "Return only valid JSON", "task-1", "Parser error", raw} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("repair messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
+func TestRunWorkerRequiresRunningTask(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/run-worker")
+	if !handled {
+		t.Fatal("run-worker handled = false")
+	}
+	got := updated.(model)
+	if got.status != "no plan" {
+		t.Fatalf("status = %q, want no plan", got.status)
 	}
 }
 

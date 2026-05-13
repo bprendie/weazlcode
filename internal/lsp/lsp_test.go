@@ -17,6 +17,26 @@ func TestDetectServersFindsGo(t *testing.T) {
 	}
 }
 
+func TestDetectServersFindsTypeScriptAndPython(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "package.json", "{}\n")
+	writeFile(t, root, "pyproject.toml", "[project]\nname = \"x\"\n")
+	manager := NewManager(root, nil)
+	servers := manager.DetectServers()
+	var sawTS, sawPython bool
+	for _, server := range servers {
+		if server.Language == "javascript/typescript" && server.Command == "typescript-language-server" {
+			sawTS = true
+		}
+		if server.Language == "python" && server.Command == "pyright-langserver" {
+			sawPython = true
+		}
+	}
+	if !sawTS || !sawPython {
+		t.Fatalf("servers = %#v", servers)
+	}
+}
+
 func TestDiagnosticsReportsGoSyntaxError(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "bad.go", "package main\nfunc broken( {\n")
@@ -26,6 +46,19 @@ func TestDiagnosticsReportsGoSyntaxError(t *testing.T) {
 		t.Fatalf("Diagnostics: %v", err)
 	}
 	if len(diagnostics) == 0 || diagnostics[0].File != "bad.go" {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+}
+
+func TestDiagnosticsReportsFallbackDelimiterError(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.ts", "export function run() {\n")
+	manager := NewManager(root, nil)
+	diagnostics, err := manager.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("Diagnostics: %v", err)
+	}
+	if len(diagnostics) == 0 || diagnostics[0].File != "app.ts" || diagnostics[0].Source != "weazlcode/fallback" {
 		t.Fatalf("diagnostics = %#v", diagnostics)
 	}
 }
@@ -46,6 +79,43 @@ func TestSymbolsDefinitionReferences(t *testing.T) {
 		t.Fatalf("Definition: %v", err)
 	}
 	if !ok || def.Kind != "type" {
+		t.Fatalf("definition = %#v ok=%v", def, ok)
+	}
+	refs, err := manager.References(context.Background(), "App")
+	if err != nil {
+		t.Fatalf("References: %v", err)
+	}
+	if len(refs) < 2 {
+		t.Fatalf("refs = %#v", refs)
+	}
+}
+
+func TestTextSymbolsDefinitionReferences(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "app.ts", "export class App {}\nexport function runApp() { return new App() }\n")
+	writeFile(t, root, "main.py", "class Runner:\n    pass\ndef run_app():\n    return Runner()\n")
+	manager := NewManager(root, nil)
+	symbols, err := manager.Symbols(context.Background(), "run")
+	if err != nil {
+		t.Fatalf("Symbols: %v", err)
+	}
+	var sawTS, sawPy bool
+	for _, symbol := range symbols {
+		if symbol.Name == "runApp" && symbol.Kind == "func" {
+			sawTS = true
+		}
+		if symbol.Name == "run_app" && symbol.Kind == "func" {
+			sawPy = true
+		}
+	}
+	if !sawTS || !sawPy {
+		t.Fatalf("symbols = %#v", symbols)
+	}
+	def, ok, err := manager.Definition(context.Background(), "Runner")
+	if err != nil {
+		t.Fatalf("Definition: %v", err)
+	}
+	if !ok || def.File != "main.py" || def.Kind != "type" {
 		t.Fatalf("definition = %#v ok=%v", def, ok)
 	}
 	refs, err := manager.References(context.Background(), "App")

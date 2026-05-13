@@ -94,6 +94,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.rejectLatestPlan(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "run-task":
 		return m.runNextTask()
+	case "run-worker":
+		return m.runWorkerModel()
 	case "worker-patch":
 		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "reviewer-input":
@@ -199,6 +201,7 @@ func slashHelp() string {
 		"/approve - approve the latest draft plan",
 		"/reject [reason] - block the latest plan",
 		"/run-task - mark first pending task running and show its worker packet",
+		"/run-worker - ask configured worker role for a WorkerPatch JSON",
 		"/worker-patch <json> - import a worker patch or blocker for the running task",
 		"/reviewer-input - show frontier-review payload for the reviewing task",
 		"/review <json> - import a reviewer verdict for the reviewing task",
@@ -361,6 +364,10 @@ func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
 		m.status = "worker patch failed"
 		return m, nil, true
 	}
+	return m.applyWorkerPatch(patch)
+}
+
+func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, bool) {
 	plan, ok, err := m.store.LatestPlan(m.session.ID)
 	if err != nil {
 		m.addSystemNote("Worker patch error: " + err.Error())
@@ -467,6 +474,119 @@ func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
 	}))
 	m.status = "task reviewing"
 	return m, nil, true
+}
+
+func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Worker run error: " + err.Error())
+		m.status = "worker run failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan generate`, `/plan draft`, or `/plan import` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	task, ok := firstRunningTask(plan.Tasks)
+	if !ok {
+		m.addSystemNote("No running task. Use `/run-task` first.")
+		m.status = "no running task"
+		return m, nil, true
+	}
+	packet, err := m.buildWorkerPacketForRun(task)
+	if err != nil {
+		m.addSystemNote("Worker run error: " + err.Error())
+		m.status = "worker run failed"
+		return m, nil, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	raw, err := m.generateWorkerPatchJSON(ctx, packet)
+	if err != nil {
+		m.addSystemNote("Worker model error: " + err.Error())
+		m.status = "worker run failed"
+		return m, nil, true
+	}
+	patch, err := m.workerPatchFromGeneratedJSON(ctx, packet, raw)
+	if err != nil {
+		m.addSystemNote("Worker model patch error: " + err.Error() + "\n\nRaw response:\n" + raw)
+		m.status = "worker run failed"
+		return m, nil, true
+	}
+	return m.applyWorkerPatch(patch)
+}
+
+func (m model) generateWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket) (string, error) {
+	client := llm.New(m.cfg.ProviderForRole("worker"))
+	return client.Complete(ctx, workerPatchMessages(packet), 4096)
+}
+
+func (m model) repairWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket, raw string, parseErr error) (string, error) {
+	client := llm.New(m.cfg.ProviderForRole("worker"))
+	return client.Complete(ctx, workerPatchRepairMessages(packet, raw, parseErr), 4096)
+}
+
+func (m model) workerPatchFromGeneratedJSON(ctx context.Context, packet coding.TaskPacket, raw string) (coding.WorkerPatch, error) {
+	patch, err := coding.ParseWorkerPatchJSON([]byte(extractJSONObject(raw)))
+	if err == nil {
+		return patch, nil
+	}
+	initialErr := err
+	repaired, repairErr := m.repairWorkerPatchJSON(ctx, packet, raw, initialErr)
+	if repairErr != nil {
+		return coding.WorkerPatch{}, fmt.Errorf("%v; repair error: %w", initialErr, repairErr)
+	}
+	patch, err = coding.ParseWorkerPatchJSON([]byte(extractJSONObject(repaired)))
+	if err != nil {
+		return coding.WorkerPatch{}, fmt.Errorf("%v; repair parse error: %w", initialErr, err)
+	}
+	return patch, nil
+}
+
+func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You are the WeazlCode local worker.",
+				"Return a WorkerPatch JSON object.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"blocker\":\"...\"}.",
+				"If you can complete the task, return a unified diff in patch and leave blocker empty.",
+				"If you need missing context or cannot safely complete the task, set blocker and leave patch empty.",
+				"Do not edit outside allowed_paths. Do not include prose outside JSON.",
+			}, "\n"),
+		},
+		{
+			Role:    "user",
+			Content: "Task packet:\n" + renderJSON(packet),
+		},
+	}
+}
+
+func workerPatchRepairMessages(packet coding.TaskPacket, raw string, parseErr error) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You repair WeazlCode WorkerPatch JSON.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"blocker\":\"...\"}.",
+				"Use the task_id from the task packet.",
+				"If a safe patch is not possible, set blocker and leave patch empty.",
+				"Do not include prose outside JSON.",
+			}, "\n"),
+		},
+		{
+			Role: "user",
+			Content: fmt.Sprintf("Task packet:\n%s\n\nParser error:\n%s\n\nRaw response to repair:\n%s",
+				renderJSON(packet),
+				parseErr,
+				strings.TrimSpace(raw),
+			),
+		},
+	}
 }
 
 type verificationResult struct {
@@ -782,6 +902,15 @@ func (m model) gitDiff() (string, error) {
 func firstReviewingTask(tasks []coding.Task) (coding.Task, bool) {
 	for _, task := range tasks {
 		if task.Status == coding.TaskStatusReviewing {
+			return task, true
+		}
+	}
+	return coding.Task{}, false
+}
+
+func firstRunningTask(tasks []coding.Task) (coding.Task, bool) {
+	for _, task := range tasks {
+		if task.Status == coding.TaskStatusRunning {
 			return task, true
 		}
 	}
