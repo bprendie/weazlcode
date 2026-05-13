@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bprendie/weazlcode/internal/coding"
+	"github.com/bprendie/weazlcode/internal/lsp"
 )
 
 const maxRepairAttempts = 2
@@ -51,6 +52,16 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("files", m.filesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "preview":
 		m.setIDEView("preview", m.previewCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "lsp":
+		m.setIDEView("lsp", m.lspCommandText())
+	case "diagnostics":
+		m.setIDEView("diagnostics", m.diagnosticsCommandText())
+	case "symbols":
+		m.setIDEView("symbols", m.symbolsCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "definition":
+		m.setIDEView("definition", m.definitionCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "references":
+		m.setIDEView("references", m.referencesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "chat":
 		m.mode = modeChat
 		m.status = "chat"
@@ -151,6 +162,11 @@ func slashHelp() string {
 		"/outputs - show recent task events and tool outputs",
 		"/files [query] - fuzzy-find project files",
 		"/preview <path> - preview a project file",
+		"/lsp - show detected language servers",
+		"/diagnostics - show project diagnostics",
+		"/symbols [query] - search project symbols",
+		"/definition <symbol> - show symbol definition",
+		"/references <symbol> - show symbol references",
 		"/chat - return to chat transcript",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
@@ -468,6 +484,7 @@ func (m model) runTaskVerification(task coding.Task) ([]verificationResult, erro
 }
 
 func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
+	diagnostics := m.codingDiagnostics()
 	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
 		DefaultAllowed: []string{
@@ -476,7 +493,30 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 		DefaultVerify: []string{
 			"go test ./...",
 		},
+		Diagnostics: diagnostics,
 	})
+}
+
+func (m model) codingDiagnostics() []coding.Diagnostic {
+	diagnostics, err := m.lspManager().Diagnostics(context.Background())
+	if err != nil || len(diagnostics) == 0 {
+		return nil
+	}
+	out := make([]coding.Diagnostic, 0, min(len(diagnostics), 25))
+	for i, diagnostic := range diagnostics {
+		if i >= 25 {
+			break
+		}
+		out = append(out, coding.Diagnostic{
+			File:     diagnostic.File,
+			Line:     diagnostic.Line,
+			Column:   diagnostic.Column,
+			Severity: diagnostic.Severity,
+			Message:  diagnostic.Message,
+			Source:   diagnostic.Source,
+		})
+	}
+	return out
 }
 
 func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, error) {
@@ -1048,6 +1088,111 @@ func (m model) diffCommandText() string {
 		return "Diff error: " + err.Error()
 	}
 	return renderDiffView(diff)
+}
+
+func (m model) lspManager() lsp.Manager {
+	return lsp.NewManager(m.project.Root, m.project.Languages)
+}
+
+func (m model) lspCommandText() string {
+	servers := m.lspManager().DetectServers()
+	if len(servers) == 0 {
+		return "LSP:\nNo language servers detected for this project."
+	}
+	var b strings.Builder
+	b.WriteString("LSP:\n")
+	for _, server := range servers {
+		state := "missing"
+		if server.Available {
+			state = "available"
+		}
+		fmt.Fprintf(&b, "- %s: %s (%s)\n", server.Language, server.Command, state)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) diagnosticsCommandText() string {
+	diagnostics, err := m.lspManager().Diagnostics(context.Background())
+	if err != nil {
+		return "Diagnostics error: " + err.Error()
+	}
+	if len(diagnostics) == 0 {
+		return "Diagnostics:\nNo diagnostics."
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Diagnostics: %d\n", len(diagnostics))
+	for i, diagnostic := range diagnostics {
+		if i >= 100 {
+			fmt.Fprintf(&b, "\n[truncated: %d diagnostics omitted]", len(diagnostics)-i)
+			break
+		}
+		fmt.Fprintf(&b, "\n%d. %s:%d:%d [%s] %s", i+1, diagnostic.File, diagnostic.Line, diagnostic.Column, diagnostic.Severity, diagnostic.Message)
+		if diagnostic.Source != "" {
+			fmt.Fprintf(&b, " (%s)", diagnostic.Source)
+		}
+	}
+	return b.String()
+}
+
+func (m model) symbolsCommandText(query string) string {
+	symbols, err := m.lspManager().Symbols(context.Background(), query)
+	if err != nil {
+		return "Symbols error: " + err.Error()
+	}
+	if len(symbols) == 0 {
+		return "Symbols:\nNo symbols found."
+	}
+	var b strings.Builder
+	if query == "" {
+		fmt.Fprintf(&b, "Symbols: %d\n", len(symbols))
+	} else {
+		fmt.Fprintf(&b, "Symbols: %d match(es) for %q\n", len(symbols), query)
+	}
+	for i, symbol := range symbols {
+		if i >= 100 {
+			fmt.Fprintf(&b, "\n[truncated: %d symbols omitted]", len(symbols)-i)
+			break
+		}
+		fmt.Fprintf(&b, "\n%d. %s %s  %s:%d", i+1, symbol.Kind, symbol.Name, symbol.File, symbol.Line)
+	}
+	return b.String()
+}
+
+func (m model) definitionCommandText(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "Usage: /definition <symbol>"
+	}
+	symbol, ok, err := m.lspManager().Definition(context.Background(), name)
+	if err != nil {
+		return "Definition error: " + err.Error()
+	}
+	if !ok {
+		return "Definition:\nNo definition found for " + name
+	}
+	return fmt.Sprintf("Definition:\n%s %s\n%s:%d", symbol.Kind, symbol.Name, symbol.File, symbol.Line)
+}
+
+func (m model) referencesCommandText(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return "Usage: /references <symbol>"
+	}
+	refs, err := m.lspManager().References(context.Background(), name)
+	if err != nil {
+		return "References error: " + err.Error()
+	}
+	if len(refs) == 0 {
+		return "References:\nNo references found for " + name
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "References: %d for %s\n", len(refs), name)
+	for i, ref := range refs {
+		if i >= 100 {
+			fmt.Fprintf(&b, "\n[truncated: %d references omitted]", len(refs)-i)
+			break
+		}
+		fmt.Fprintf(&b, "\n%d. %s:%d  %s", i+1, ref.File, ref.Line, ref.Text)
+	}
+	return b.String()
 }
 
 func emptyFallback(value, fallback string) string {

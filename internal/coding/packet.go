@@ -14,6 +14,7 @@ type TaskPacket struct {
 	AllowedPaths     []string          `json:"allowed_paths"`
 	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
 	ContextFiles     []ContextFile     `json:"context_files,omitempty"`
+	Diagnostics      []Diagnostic      `json:"diagnostics,omitempty"`
 	ToolsAllowed     []string          `json:"tools_allowed"`
 	Verification     []string          `json:"verification,omitempty"`
 	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks,omitempty"`
@@ -25,6 +26,15 @@ type ContextFile struct {
 	EndLine   int    `json:"end_line,omitempty"`
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type Diagnostic struct {
+	File     string `json:"file"`
+	Line     int    `json:"line"`
+	Column   int    `json:"column"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+	Source   string `json:"source,omitempty"`
 }
 
 type WorkerPatch struct {
@@ -50,6 +60,7 @@ type ContextPackOptions struct {
 	DefaultTools    []string
 	DefaultVerify   []string
 	DefaultAllowed  []string
+	Diagnostics     []Diagnostic
 	LineRangeByFile map[string]LineRange
 }
 
@@ -88,6 +99,7 @@ func BuildTaskPacket(task Task, opts ContextPackOptions) (TaskPacket, error) {
 		AllowedPaths:     allowed,
 		ForbiddenPaths:   task.ForbiddenPaths,
 		ContextFiles:     contextFiles,
+		Diagnostics:      opts.Diagnostics,
 		ToolsAllowed:     tools,
 		Verification:     verification,
 		AcceptanceChecks: task.AcceptanceChecks,

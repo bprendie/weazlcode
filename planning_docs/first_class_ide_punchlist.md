@@ -102,15 +102,15 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 7: LSP Foundation
 
-- [ ] Add LSP process manager.
-- [ ] Detect language servers from project files.
-- [ ] Start with Go via `gopls`.
-- [ ] Collect diagnostics.
-- [ ] Add symbol search.
-- [ ] Add definition lookup.
-- [ ] Add references lookup.
-- [ ] Include diagnostics in task packets.
-- [ ] Show diagnostics in a TUI panel.
+- [x] Add LSP process manager.
+- [x] Detect language servers from project files.
+- [x] Start with Go via `gopls`.
+- [x] Collect diagnostics.
+- [x] Add symbol search.
+- [x] Add definition lookup.
+- [x] Add references lookup.
+- [x] Include diagnostics in task packets.
+- [x] Show diagnostics in a TUI panel.
 
 ## Milestone 8: First-Class Project Instructions
 
