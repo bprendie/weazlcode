@@ -148,6 +148,33 @@ func TestGeneratedPlanParsing(t *testing.T) {
 	}
 }
 
+func TestGeneratedPlanRepairPrompt(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":123,"tasks":[{"name":"bad"}]}`
+	_, parseErr := m.planFromGeneratedJSON(raw)
+	if parseErr == nil {
+		t.Fatal("planFromGeneratedJSON returned nil error for malformed response")
+	}
+	messages := m.planRepairMessages("change README", raw, parseErr)
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"Return only valid JSON", "Do not add unknown fields", "Parser error", raw, "change README"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("repair messages missing %q:\n%s", want, combined)
+		}
+	}
+	repaired := `{"title":"Generated","summary":"Repaired","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	plan, err := m.planFromGeneratedJSON(repaired)
+	if err != nil {
+		t.Fatalf("repaired plan parse: %v", err)
+	}
+	if plan.Title != "Generated" || len(plan.Tasks) != 1 {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
 func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 	m := commandTestModel(t)
 	root := t.TempDir()

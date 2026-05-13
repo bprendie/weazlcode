@@ -1169,9 +1169,19 @@ func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
 	}
 	plan, err := m.planFromGeneratedJSON(raw)
 	if err != nil {
-		m.addSystemNote("Plan generate parse error: " + err.Error() + "\n\nRaw response:\n" + raw)
-		m.status = "plan generate failed"
-		return m, nil, true
+		initialErr := err
+		repaired, repairErr := m.repairPlanJSON(ctx, request, raw, initialErr)
+		if repairErr != nil {
+			m.addSystemNote("Plan generate parse error: " + initialErr.Error() + "\n\nRepair error: " + repairErr.Error() + "\n\nRaw response:\n" + raw)
+			m.status = "plan generate failed"
+			return m, nil, true
+		}
+		plan, err = m.planFromGeneratedJSON(repaired)
+		if err != nil {
+			m.addSystemNote("Plan generate parse error: " + initialErr.Error() + "\n\nRepair parse error: " + err.Error() + "\n\nRaw response:\n" + raw + "\n\nRepaired response:\n" + repaired)
+			m.status = "plan generate failed"
+			return m, nil, true
+		}
 	}
 	if err := m.store.SavePlan(plan); err != nil {
 		m.err = err.Error()
@@ -1189,6 +1199,11 @@ func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
 func (m model) generatePlanJSON(ctx context.Context, request string) (string, error) {
 	client := llm.New(m.cfg.ProviderForRole("orchestrator"))
 	return client.Complete(ctx, m.planGenerateMessages(request), 2048)
+}
+
+func (m model) repairPlanJSON(ctx context.Context, request, raw string, parseErr error) (string, error) {
+	client := llm.New(m.cfg.ProviderForRole("orchestrator"))
+	return client.Complete(ctx, m.planRepairMessages(request, raw, parseErr), 2048)
 }
 
 func (m model) planGenerateMessages(request string) []llm.ChatMessage {
@@ -1229,6 +1244,28 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 		{
 			Role:    "user",
 			Content: strings.TrimSpace(contextText.String()) + "\n\nUser request:\n" + strings.TrimSpace(request),
+		},
+	}
+}
+
+func (m model) planRepairMessages(request, raw string, parseErr error) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You repair WeazlCode plan JSON.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
+			}, "\n"),
+		},
+		{
+			Role: "user",
+			Content: fmt.Sprintf("User request:\n%s\n\nParser error:\n%s\n\nRaw response to repair:\n%s",
+				strings.TrimSpace(request),
+				parseErr,
+				strings.TrimSpace(raw),
+			),
 		},
 	}
 }
