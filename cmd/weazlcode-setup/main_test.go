@@ -124,6 +124,23 @@ func TestConfigureLLMProviderNoneUsesLocalRoles(t *testing.T) {
 	}
 }
 
+func TestConfigureSetupOptionsPromptsLLMBeforeTools(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("4\n-\n-\n-\n2\n"))
+	cfg := config.Default()
+	cfg.Tools.AlphaVantageKey = "alpha"
+	cfg.Tools.BraveAPIKey = "brave"
+	cfg.Tools.WorkspaceRoots = []string{"/tmp/work"}
+
+	got := configureSetupOptions(reader, cfg)
+
+	if got.ModelRoles.Orchestrator != "" || got.ModelRoles.Reviewer != "" {
+		t.Fatalf("ModelRoles = %#v, want local planning fallback", got.ModelRoles)
+	}
+	if got.Tools.AlphaVantageKey != "" || got.Tools.BraveAPIKey != "" || len(got.Tools.WorkspaceRoots) != 0 || got.Tools.Enabled {
+		t.Fatalf("Tools = %#v, want cleared keys/roots and disabled", got.Tools)
+	}
+}
+
 func TestConfigureToolsClearsKeysWithDash(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("-\n-\n-\n2\n"))
 	cfg := config.Config{

@@ -44,18 +44,23 @@ func run() error {
 		fmt.Printf("Could not query models: %v\n", err)
 		model := askString(reader, "Model name", defaultModel(providerType))
 		contextWindow := askContextWindow(reader)
-		return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+		return writeConfig(cfgPath, configureSetupOptions(reader, cfg), providerType, serverURL, model, contextWindow)
 	}
 	if len(models) == 0 {
 		fmt.Println("Provider returned no models.")
 		model := askString(reader, "Model name", defaultModel(providerType))
 		contextWindow := askContextWindow(reader)
-		return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+		return writeConfig(cfgPath, configureSetupOptions(reader, cfg), providerType, serverURL, model, contextWindow)
 	}
 
 	model := askModel(reader, models)
 	contextWindow := askContextWindow(reader)
-	return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+	return writeConfig(cfgPath, configureSetupOptions(reader, cfg), providerType, serverURL, model, contextWindow)
+}
+
+func configureSetupOptions(reader *bufio.Reader, cfg config.Config) config.Config {
+	cfg = configureLLMProvider(reader, cfg)
+	return configureTools(reader, cfg)
 }
 
 func fetchModels(providerType, serverURL string) ([]string, error) {

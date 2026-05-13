@@ -183,8 +183,8 @@ Goal: make generated plans and model runs reliable enough for repeated real-repo
 
 Goal: make the single-worker loop harder to misuse by tightening setup validation, task quality, worker guardrails, and reviewer checks before adding broader extension systems.
 
-- [ ] Run setup UX smoke for OpenAI, Claude, custom OpenAI-compatible, and none/local fallback paths.
-- [ ] Verify README setup instructions against the actual setup prompts.
+- [x] Run setup UX smoke for OpenAI, Claude, custom OpenAI-compatible, and none/local fallback paths.
+- [x] Verify README setup instructions against the actual setup prompts.
 - [ ] Add stricter planner prompt rules for bounded paths, concrete edit goals, and acceptance checks.
 - [ ] Add task quality validation before approval for vague goals, missing paths, missing acceptance checks, and broad file scopes.
 - [ ] Add `/plan validate` or automatic validation output in the plan/task workflow.
