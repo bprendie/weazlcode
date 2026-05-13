@@ -1231,6 +1231,54 @@ func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	}
 }
 
+func TestReviewApproveBlockedByLocalGuardrail(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Review guardrail","summary":"Check empty diff","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusReviewing); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/review approve Looks good")
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	if got.status != "review guardrail" {
+		t.Fatalf("status = %q, want review guardrail", got.status)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "review_guardrail" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestReviewNeedsFixShorthandRequestsRepair(t *testing.T) {
 	m, _ := commandTestModelWithReviewingTask(t)
 	updated, _, handled := m.handleSlashCommand(`/review needs-fix missing docs;;tests not run`)

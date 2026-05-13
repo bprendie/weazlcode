@@ -1263,6 +1263,8 @@ func reviewerVerdictMessages(input coding.ReviewerInput) []llm.ChatMessage {
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"verdict\":\"approve|needs_fix|blocked\",\"summary\":\"...\",\"issues\":[\"...\"]}.",
 				"Approve only when the diff satisfies the task packet, allowed paths, verification output, and acceptance checks.",
+				"Mechanically compare the task goal, allowed paths, diff paths, verification output, and each acceptance check before approving.",
+				"If the diff is empty, unrelated, outside allowed paths, missing expected verification, or only plausibly related, use needs_fix with concrete issues.",
 				"Use needs_fix for focused repairable issues. Use blocked only for missing context or user decisions.",
 			}, "\n"),
 		},
@@ -1314,6 +1316,29 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			Message: fmt.Sprintf("%s/%s in %dms", telemetry.Provider, telemetry.Model, telemetry.LatencyMS),
 			Payload: payload,
 		})
+	}
+	if verdict.Verdict == coding.ReviewApprove {
+		if issues := m.reviewApprovalIssues(task); len(issues) > 0 {
+			guardrail := coding.ReviewVerdict{
+				Verdict: coding.ReviewNeedsFix,
+				Summary: "Approval blocked by local review guardrails.",
+				Issues:  issues,
+			}
+			payload, _ := json.Marshal(guardrail)
+			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+				TaskID:  task.ID,
+				Type:    "review_guardrail",
+				Message: guardrail.Summary,
+				Payload: payload,
+			})
+			m.writeRunArtifact("review_guardrail", struct {
+				TaskID  string               `json:"task_id"`
+				Verdict coding.ReviewVerdict `json:"verdict"`
+			}{TaskID: task.ID, Verdict: guardrail})
+			m.addSystemNote("Reviewer approval blocked by local guardrails:\n" + renderJSON(guardrail))
+			m.status = "review guardrail"
+			return m, nil, true
+		}
 	}
 	payload, _ := json.Marshal(verdict)
 	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
@@ -1393,6 +1418,60 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		m.status = "review blocked"
 	}
 	return m, nil, true
+}
+
+func (m model) reviewApprovalIssues(task coding.Task) []string {
+	var issues []string
+	diff, err := m.gitDiff()
+	if err != nil {
+		issues = append(issues, "could not read git diff: "+err.Error())
+	} else {
+		paths := coding.PatchPaths(diff)
+		if len(paths) == 0 {
+			issues = append(issues, "diff is empty; there is nothing to approve")
+		} else if err := coding.ValidatePatchPaths(paths, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
+			issues = append(issues, "diff paths do not match task scope: "+err.Error())
+		}
+	}
+	if len(task.AcceptanceChecks) == 0 {
+		issues = append(issues, "task has no acceptance checks to review")
+	}
+	verification := m.taskVerification(task)
+	if len(verification) > 0 {
+		events, err := m.store.TaskEvents(task.ID)
+		if err != nil {
+			issues = append(issues, "could not read verification events: "+err.Error())
+		} else if latestVerificationFailed(events) {
+			issues = append(issues, "latest verification failed")
+		} else if !latestVerificationPassed(events) {
+			issues = append(issues, "verification was expected but no passing verification event was recorded")
+		}
+	}
+	return issues
+}
+
+func latestVerificationPassed(events []coding.TaskEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "verification":
+			return true
+		case "verification_error":
+			return false
+		}
+	}
+	return false
+}
+
+func latestVerificationFailed(events []coding.TaskEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "verification_error":
+			return true
+		case "verification":
+			return false
+		}
+	}
+	return false
 }
 
 func parseReviewCommand(raw string) (coding.ReviewVerdict, error) {

@@ -37,14 +37,22 @@ func PatchPaths(patch string) []string {
 		if i := strings.IndexAny(p, "\t "); i >= 0 {
 			p = p[:i]
 		}
-		p = strings.TrimPrefix(p, "a/")
-		p = strings.TrimPrefix(p, "b/")
+		p = trimDiffPrefix(p)
 		if p != "" && !seen[p] {
 			seen[p] = true
 			paths = append(paths, p)
 		}
 	}
 	return paths
+}
+
+func trimDiffPrefix(path string) string {
+	for _, prefix := range []string{"a/", "b/", "i/", "w/", "c/", "o/"} {
+		if strings.HasPrefix(path, prefix) {
+			return strings.TrimPrefix(path, prefix)
+		}
+	}
+	return path
 }
 
 func WorkerFileEditPaths(files []WorkerFileEdit) []string {

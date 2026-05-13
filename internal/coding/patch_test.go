@@ -28,6 +28,21 @@ diff --git a/README.md b/README.md
 	}
 }
 
+func TestPatchPathsTrimsMnemonicDiffPrefixes(t *testing.T) {
+	patch := `diff --git i/README.md w/README.md
+--- i/README.md
++++ w/README.md
+@@ -1 +1 @@
+-old
++new
+`
+	got := PatchPaths(patch)
+	want := []string{"README.md"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("PatchPaths = %#v, want %#v", got, want)
+	}
+}
+
 func TestValidatePatchPathsAllowedForbidden(t *testing.T) {
 	if err := ValidatePatchPaths([]string{"internal/coding/a.go"}, []string{"internal"}, []string{"internal/secrets"}); err != nil {
 		t.Fatalf("ValidatePatchPaths allowed: %v", err)
