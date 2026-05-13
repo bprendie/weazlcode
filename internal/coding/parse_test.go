@@ -37,6 +37,27 @@ func TestPrepareImportedPlanDefaultsRuntimeFields(t *testing.T) {
 	}
 }
 
+func TestPrepareImportedPlanNormalizesProjectPaths(t *testing.T) {
+	plan := Plan{
+		Title:   "Plan",
+		Summary: "Summary",
+		Tasks: []Task{{
+			Title:            "Task",
+			Goal:             "Do work",
+			AllowedPaths:     []string{"/tmp/project/README.md"},
+			ForbiddenPaths:   []string{"/tmp/project/secrets"},
+			ContextFiles:     []string{"/tmp/project/internal/app.go"},
+			Verification:     []string{"go test ./..."},
+			AcceptanceChecks: []AcceptanceCheck{{Description: "done"}},
+		}},
+	}
+	got := PrepareImportedPlan(plan, "session-1", "/tmp/project", func() string { return "id" })
+	task := got.Tasks[0]
+	if task.AllowedPaths[0] != "README.md" || task.ForbiddenPaths[0] != "secrets" || task.ContextFiles[0] != "internal/app.go" {
+		t.Fatalf("task paths = %#v", task)
+	}
+}
+
 func TestParseWorkerPatchJSON(t *testing.T) {
 	patch, err := ParseWorkerPatchJSON([]byte(`{"task_id":"task-1","summary":"changed","patch":"diff --git a/a b/a"}`))
 	if err != nil {
@@ -44,6 +65,29 @@ func TestParseWorkerPatchJSON(t *testing.T) {
 	}
 	if patch.TaskID != "task-1" {
 		t.Fatalf("patch = %#v", patch)
+	}
+}
+
+func TestParseWorkerPatchJSONAllowsFileEdits(t *testing.T) {
+	patch, err := ParseWorkerPatchJSON([]byte(`{"task_id":"task-1","summary":"changed","patch":"","files":[{"path":" README.md ","content":"new\n"}]}`))
+	if err != nil {
+		t.Fatalf("ParseWorkerPatchJSON: %v", err)
+	}
+	if len(patch.Files) != 1 || patch.Files[0].Path != "README.md" || patch.Files[0].Content != "new\n" {
+		t.Fatalf("patch = %#v", patch)
+	}
+}
+
+func TestParseWorkerPatchJSONNormalizesNoBlockerSentinels(t *testing.T) {
+	patch, err := ParseWorkerPatchJSON([]byte(`{"task_id":" task-1 ","summary":" changed ","patch":"diff --git a/a b/a","blocker":"none"}`))
+	if err != nil {
+		t.Fatalf("ParseWorkerPatchJSON: %v", err)
+	}
+	if patch.TaskID != "task-1" || patch.Summary != "changed" || patch.Blocker != "" {
+		t.Fatalf("patch = %#v", patch)
+	}
+	if _, err := ParseWorkerPatchJSON([]byte(`{"task_id":"task-1","summary":"changed","patch":"","blocker":"none"}`)); err == nil {
+		t.Fatal("ParseWorkerPatchJSON returned nil error for empty patch with no real blocker")
 	}
 }
 

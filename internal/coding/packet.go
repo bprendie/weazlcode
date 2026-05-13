@@ -46,10 +46,16 @@ type Diagnostic struct {
 }
 
 type WorkerPatch struct {
-	TaskID  string `json:"task_id"`
-	Summary string `json:"summary"`
-	Patch   string `json:"patch"`
-	Blocker string `json:"blocker,omitempty"`
+	TaskID  string           `json:"task_id"`
+	Summary string           `json:"summary"`
+	Patch   string           `json:"patch"`
+	Files   []WorkerFileEdit `json:"files,omitempty"`
+	Blocker string           `json:"blocker,omitempty"`
+}
+
+type WorkerFileEdit struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
 }
 
 type ReviewerInput struct {
@@ -150,16 +156,28 @@ func ValidateWorkerPatch(patch WorkerPatch) error {
 	if strings.TrimSpace(patch.Blocker) != "" {
 		return nil
 	}
-	if strings.TrimSpace(patch.Patch) == "" {
-		return fmt.Errorf("worker patch requires patch or blocker")
+	if strings.TrimSpace(patch.Patch) == "" && len(patch.Files) == 0 {
+		return fmt.Errorf("worker patch requires patch, files, or blocker")
+	}
+	for _, file := range patch.Files {
+		if strings.TrimSpace(file.Path) == "" {
+			return fmt.Errorf("worker file edit path is required")
+		}
 	}
 	return nil
 }
 
 func packContextFiles(paths []string, opts ContextPackOptions) ([]ContextFile, error) {
 	files := make([]ContextFile, 0, len(paths))
-	for _, rel := range paths {
-		rel = strings.TrimSpace(rel)
+	lineRanges := map[string]LineRange{}
+	for path, lineRange := range opts.LineRangeByFile {
+		lineRanges[filepath.ToSlash(filepath.Clean(path))] = lineRange
+	}
+	for _, spec := range paths {
+		rel, specRange, err := parseContextFileSpec(spec)
+		if err != nil {
+			return nil, err
+		}
 		if rel == "" {
 			continue
 		}
@@ -174,7 +192,11 @@ func packContextFiles(paths []string, opts ContextPackOptions) ([]ContextFile, e
 		}
 		content := string(data)
 		contextFile := ContextFile{Path: filepath.ToSlash(clean), StartLine: 1}
-		if r, ok := opts.LineRangeByFile[filepath.ToSlash(clean)]; ok && r.StartLine > 0 && r.EndLine >= r.StartLine {
+		r := specRange
+		if r.StartLine == 0 && r.EndLine == 0 {
+			r = lineRanges[filepath.ToSlash(clean)]
+		}
+		if r.StartLine > 0 && r.EndLine >= r.StartLine {
 			content, contextFile.StartLine, contextFile.EndLine = sliceLines(content, r.StartLine, r.EndLine)
 		} else {
 			contextFile.EndLine = countPacketLines(content)
@@ -187,6 +209,54 @@ func packContextFiles(paths []string, opts ContextPackOptions) ([]ContextFile, e
 		files = append(files, contextFile)
 	}
 	return files, nil
+}
+
+func parseContextFileSpec(spec string) (string, LineRange, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", LineRange{}, nil
+	}
+	path := spec
+	var lineRange LineRange
+	if hash := strings.LastIndex(spec, "#L"); hash >= 0 {
+		path = strings.TrimSpace(spec[:hash])
+		rangeSpec := strings.TrimSpace(spec[hash+2:])
+		parts := strings.Split(rangeSpec, "-L")
+		if len(parts) != 2 {
+			parts = strings.Split(rangeSpec, "-")
+		}
+		if len(parts) != 2 {
+			return "", LineRange{}, fmt.Errorf("invalid context file range %q", spec)
+		}
+		start, err := parsePositiveInt(parts[0])
+		if err != nil {
+			return "", LineRange{}, fmt.Errorf("invalid context file range %q", spec)
+		}
+		end, err := parsePositiveInt(parts[1])
+		if err != nil || end < start {
+			return "", LineRange{}, fmt.Errorf("invalid context file range %q", spec)
+		}
+		lineRange = LineRange{StartLine: start, EndLine: end}
+	}
+	return path, lineRange, nil
+}
+
+func parsePositiveInt(raw string) (int, error) {
+	raw = strings.TrimPrefix(strings.TrimSpace(raw), "L")
+	if raw == "" {
+		return 0, fmt.Errorf("empty integer")
+	}
+	n := 0
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return 0, fmt.Errorf("invalid integer")
+		}
+		n = n*10 + int(r-'0')
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("integer must be positive")
+	}
+	return n, nil
 }
 
 func sliceLines(content string, start, end int) (string, int, int) {

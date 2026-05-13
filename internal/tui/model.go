@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/bprendie/weazlcode/internal/coding"
 	"github.com/bprendie/weazlcode/internal/config"
 	"github.com/bprendie/weazlcode/internal/llm"
 	"github.com/bprendie/weazlcode/internal/project"
@@ -80,6 +82,9 @@ type model struct {
 	toolResults         []string
 	pendingToolInput    int
 	pendingToolOutput   int
+	modelRunID          int
+	activeModelRunID    int
+	cancelModel         context.CancelFunc
 }
 
 type streamEvent struct {
@@ -98,6 +103,41 @@ type contextTrimMsg struct {
 	throughID       int64
 	summary         string
 	err             error
+}
+
+type planGenerateMsg struct {
+	runID   int
+	request string
+	raw     string
+	plan    coding.Plan
+	err     error
+}
+
+type workerRunMsg struct {
+	runID     int
+	raw       string
+	patch     coding.WorkerPatch
+	telemetry modelTelemetry
+	err       error
+}
+
+type reviewerRunMsg struct {
+	runID     int
+	raw       string
+	verdict   coding.ReviewVerdict
+	telemetry modelTelemetry
+	err       error
+}
+
+type modelTelemetry struct {
+	Role               string `json:"role"`
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	LatencyMS          int64  `json:"latency_ms"`
+	RawChars           int    `json:"raw_chars"`
+	InputTokens        int    `json:"input_tokens,omitempty"`
+	OutputTokens       int    `json:"output_tokens,omitempty"`
+	JSONRepairAttempts int    `json:"json_repair_attempts"`
 }
 
 func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *tools.Registry, projectSummary project.Summary) tea.Model {
@@ -349,6 +389,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("context trimmed through message %d", msg.throughID)
 		m.renderMessages()
 		return m, nil
+	case planGenerateMsg:
+		if msg.runID != m.activeModelRunID {
+			return m, nil
+		}
+		m.activeModelRunID = 0
+		m.cancelModel = nil
+		m.thinking = false
+		if msg.err != nil {
+			m.addSystemNote("Plan generate error: " + msg.err.Error())
+			m.status = "plan generate failed"
+			return m, nil
+		}
+		plan := msg.plan
+		if err := m.store.SavePlan(plan); err != nil {
+			m.err = err.Error()
+			m.status = "plan generate failed"
+			return m, nil
+		}
+		if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+			plan = saved
+		}
+		m.writeRunArtifact("plan", plan)
+		m.addSystemNote(renderPlan(plan))
+		m.status = "plan generated"
+		return m, nil
+	case workerRunMsg:
+		if msg.runID != m.activeModelRunID {
+			return m, nil
+		}
+		m.activeModelRunID = 0
+		m.cancelModel = nil
+		m.thinking = false
+		if msg.err != nil {
+			m.addSystemNote("Worker model error: " + msg.err.Error())
+			m.status = "worker run failed"
+			return m, nil
+		}
+		next, cmd, _ := m.applyWorkerPatchWithTelemetry(msg.patch, true, &msg.telemetry)
+		return next, cmd
+	case reviewerRunMsg:
+		if msg.runID != m.activeModelRunID {
+			return m, nil
+		}
+		m.activeModelRunID = 0
+		m.cancelModel = nil
+		m.thinking = false
+		if msg.err != nil {
+			m.addSystemNote("Reviewer model error: " + msg.err.Error())
+			m.status = "reviewer run failed"
+			return m, nil
+		}
+		next, cmd, _ := m.applyReviewVerdict(msg.verdict, &msg.telemetry)
+		return next, cmd
 	case previousSessionMsg:
 		m.thinking = false
 		if msg.err != nil {

@@ -43,6 +43,35 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 	}
 }
 
+func TestBuildTaskPacketPacksContextRangeSpecs(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "internal"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "file.go"), []byte("one\ntwo\nthree\nfour\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	task := Task{
+		ID:           "task-1",
+		PlanID:       "plan-1",
+		Title:        "Task",
+		Goal:         "Edit file",
+		Status:       TaskStatusPending,
+		AllowedPaths: []string{"internal/file.go"},
+		ContextFiles: []string{"internal/file.go#L2-L3"},
+	}
+	packet, err := BuildTaskPacket(task, ContextPackOptions{ProjectRoot: root})
+	if err != nil {
+		t.Fatalf("BuildTaskPacket: %v", err)
+	}
+	if len(packet.ContextFiles) != 1 || packet.ContextFiles[0].Path != "internal/file.go" {
+		t.Fatalf("context files = %#v", packet.ContextFiles)
+	}
+	if packet.ContextFiles[0].StartLine != 2 || packet.ContextFiles[0].EndLine != 3 || packet.ContextFiles[0].Content != "two\nthree" {
+		t.Fatalf("context file = %#v", packet.ContextFiles[0])
+	}
+}
+
 func TestBuildTaskPacketRejectsOutsideContext(t *testing.T) {
 	task := Task{
 		ID:           "task-1",

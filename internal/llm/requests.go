@@ -9,11 +9,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/bprendie/weazlcode/internal/config"
 )
 
-func (c Client) completeOpenAICompat(ctx context.Context, messages []ChatMessage, maxTokens int) (string, error) {
+var postRetryDelay = func(attempt int) time.Duration {
+	return time.Duration(attempt) * 250 * time.Millisecond
+}
+
+func (c Client) completeOpenAICompat(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {
 	reqBody := map[string]any{
 		"model":       c.provider.Model,
 		"messages":    messages,
@@ -23,7 +28,7 @@ func (c Client) completeOpenAICompat(ctx context.Context, messages []ChatMessage
 	}
 	resp, err := c.post(ctx, "/v1/chat/completions", reqBody)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	defer resp.Body.Close()
 	var body struct {
@@ -35,20 +40,29 @@ func (c Client) completeOpenAICompat(ctx context.Context, messages []ChatMessage
 		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
+		Usage *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	if body.Error != nil {
-		return "", errors.New(body.Error.Message)
+		return "", Usage{}, errors.New(body.Error.Message)
 	}
 	if len(body.Choices) == 0 {
-		return "", errors.New("empty completion response")
+		return "", Usage{}, errors.New("empty completion response")
 	}
-	return strings.TrimSpace(body.Choices[0].Message.Content), nil
+	var usage Usage
+	if body.Usage != nil {
+		usage.InputTokens = body.Usage.PromptTokens
+		usage.OutputTokens = body.Usage.CompletionTokens
+	}
+	return strings.TrimSpace(body.Choices[0].Message.Content), usage, nil
 }
 
-func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxTokens int) (string, error) {
+func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {
 	reqBody := map[string]any{
 		"model":    c.provider.Model,
 		"messages": messages,
@@ -60,22 +74,28 @@ func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxT
 	}
 	resp, err := c.post(ctx, "/api/chat", reqBody)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	defer resp.Body.Close()
 	var body struct {
 		Message struct {
 			Content string `json:"content"`
 		} `json:"message"`
-		Error string `json:"error"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+		Error           string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	if body.Error != "" {
-		return "", errors.New(body.Error)
+		return "", Usage{}, errors.New(body.Error)
 	}
-	return strings.TrimSpace(body.Message.Content), nil
+	usage := Usage{
+		InputTokens:  body.PromptEvalCount,
+		OutputTokens: body.EvalCount,
+	}
+	return strings.TrimSpace(body.Message.Content), usage, nil
 }
 
 func (c Client) post(ctx context.Context, path string, body any) (*http.Response, error) {
@@ -84,28 +104,69 @@ func (c Client) post(ctx context.Context, path string, body any) (*http.Response
 		return nil, err
 	}
 	url := baseURL(c.provider) + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if c.provider.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.provider.APIKey)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		detail := strings.TrimSpace(string(body))
-		if detail == "" {
-			return nil, fmt.Errorf("%s returned %s", url, resp.Status)
+
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+		if err != nil {
+			return nil, err
 		}
-		return nil, fmt.Errorf("%s returned %s: %s", url, resp.Status, detail)
+		req.Header.Set("Content-Type", "application/json")
+		if c.provider.APIKey != "" {
+			req.Header.Set("Authorization", "Bearer "+c.provider.APIKey)
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < maxAttempts && ctx.Err() == nil {
+				if sleepErr := sleepBeforeRetry(ctx, attempt); sleepErr != nil {
+					return nil, sleepErr
+				}
+				continue
+			}
+			return nil, err
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+			return resp, nil
+		}
+
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		detail := strings.TrimSpace(string(body))
+		lastErr = formatHTTPError(url, resp.Status, detail)
+		if attempt < maxAttempts && retryableHTTPStatus(resp.StatusCode) && ctx.Err() == nil {
+			if sleepErr := sleepBeforeRetry(ctx, attempt); sleepErr != nil {
+				return nil, sleepErr
+			}
+			continue
+		}
+		return nil, lastErr
 	}
-	return resp, nil
+	return nil, lastErr
+}
+
+func formatHTTPError(url, status, detail string) error {
+	if detail == "" {
+		return fmt.Errorf("%s returned %s", url, status)
+	}
+	return fmt.Errorf("%s returned %s: %s", url, status, detail)
+}
+
+func retryableHTTPStatus(status int) bool {
+	return status == http.StatusTooManyRequests || status == http.StatusRequestTimeout || status >= 500
+}
+
+func sleepBeforeRetry(ctx context.Context, attempt int) error {
+	delay := postRetryDelay(attempt)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func baseURL(provider config.Provider) string {

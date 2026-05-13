@@ -79,6 +79,11 @@ func (c Client) Stream(ctx context.Context, history []storage.Message, prompt st
 }
 
 func (c Client) Complete(ctx context.Context, messages []ChatMessage, maxTokens int) (string, error) {
+	content, _, err := c.CompleteWithUsage(ctx, messages, maxTokens)
+	return content, err
+}
+
+func (c Client) CompleteWithUsage(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {
 	if maxTokens <= 0 {
 		maxTokens = 2048
 	}
@@ -88,7 +93,7 @@ func (c Client) Complete(ctx context.Context, messages []ChatMessage, maxTokens 
 	case "ollama":
 		return c.completeOllama(ctx, messages, maxTokens)
 	default:
-		return "", fmt.Errorf("unsupported provider type %q", c.provider.Type)
+		return "", Usage{}, fmt.Errorf("unsupported provider type %q", c.provider.Type)
 	}
 }
 

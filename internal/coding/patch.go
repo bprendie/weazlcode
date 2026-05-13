@@ -3,6 +3,7 @@ package coding
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,20 @@ func PatchPaths(patch string) []string {
 			seen[p] = true
 			paths = append(paths, p)
 		}
+	}
+	return paths
+}
+
+func WorkerFileEditPaths(files []WorkerFileEdit) []string {
+	seen := map[string]bool{}
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		path := strings.TrimSpace(file.Path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		paths = append(paths, path)
 	}
 	return paths
 }
@@ -77,6 +92,30 @@ func ValidatePatchPaths(paths, allowed, forbidden []string) error {
 	return nil
 }
 
+func ApplyFileEdits(projectRoot string, files []WorkerFileEdit) (PatchApplyResult, error) {
+	paths := WorkerFileEditPaths(files)
+	if len(paths) == 0 {
+		return PatchApplyResult{}, fmt.Errorf("file edits do not contain paths")
+	}
+	if strings.TrimSpace(projectRoot) == "" {
+		return PatchApplyResult{}, fmt.Errorf("project root is required")
+	}
+	for _, file := range files {
+		path, err := cleanRelativePath(file.Path)
+		if err != nil {
+			return PatchApplyResult{}, err
+		}
+		full := filepath.Join(projectRoot, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return PatchApplyResult{}, err
+		}
+		if err := os.WriteFile(full, []byte(file.Content), 0o644); err != nil {
+			return PatchApplyResult{}, err
+		}
+	}
+	return PatchApplyResult{Paths: paths, Output: "File edits applied."}, nil
+}
+
 func ApplyPatch(projectRoot, patch string) (PatchApplyResult, error) {
 	paths := PatchPaths(patch)
 	if len(paths) == 0 {
@@ -85,10 +124,14 @@ func ApplyPatch(projectRoot, patch string) (PatchApplyResult, error) {
 	if strings.TrimSpace(projectRoot) == "" {
 		return PatchApplyResult{}, fmt.Errorf("project root is required")
 	}
+	args := []string{"apply"}
 	if _, err := runGitApply(projectRoot, []string{"apply", "--check"}, patch); err != nil {
-		return PatchApplyResult{}, err
+		if _, recountErr := runGitApply(projectRoot, []string{"apply", "--check", "--recount"}, patch); recountErr != nil {
+			return PatchApplyResult{}, err
+		}
+		args = []string{"apply", "--recount"}
 	}
-	out, err := runGitApply(projectRoot, []string{"apply"}, patch)
+	out, err := runGitApply(projectRoot, args, patch)
 	if err != nil {
 		return PatchApplyResult{}, err
 	}

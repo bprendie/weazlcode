@@ -70,3 +70,49 @@ func TestApplyPatch(t *testing.T) {
 		t.Fatalf("file content = %q, want new", data)
 	}
 }
+
+func TestApplyPatchRecountsBadHunkLineCounts(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "README.md")
+	if err := os.WriteFile(path, []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,99 +1,99 @@
+-old
++new
+`
+	if _, err := ApplyPatch(root, patch); err != nil {
+		t.Fatalf("ApplyPatch: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new\n" {
+		t.Fatalf("file content = %q, want new", data)
+	}
+}
+
+func TestApplyFileEdits(t *testing.T) {
+	root := t.TempDir()
+	result, err := ApplyFileEdits(root, []WorkerFileEdit{{Path: "docs/README.md", Content: "new\n"}})
+	if err != nil {
+		t.Fatalf("ApplyFileEdits: %v", err)
+	}
+	if len(result.Paths) != 1 || result.Paths[0] != "docs/README.md" {
+		t.Fatalf("paths = %#v", result.Paths)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "docs", "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new\n" {
+		t.Fatalf("file content = %q, want new", data)
+	}
+	if _, err := ApplyFileEdits(root, []WorkerFileEdit{{Path: "../outside.md", Content: "bad"}}); err == nil {
+		t.Fatal("ApplyFileEdits allowed path traversal")
+	}
+}

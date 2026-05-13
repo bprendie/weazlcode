@@ -143,6 +143,41 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Exercise the single-worker loop against local Ollama/vLLM models.
 - [x] Use frontier planner/reviewer roles on an API-compatible endpoint.
 - [x] Expand LSP support beyond the current Go-first foundation.
+- [x] Run `/plan generate` and `/run-worker` as asynchronous TUI commands so long model calls do not block input rendering.
+- [x] Add one-shot WorkerPatch JSON repair for malformed local-worker responses.
+- [x] Add one-shot WorkerPatch diff repair when a local worker returns invalid unified diff text.
+- [x] Normalize model-generated project paths and no-blocker sentinel values before task execution.
+- [x] Tolerate small-model hunk line-count mistakes with `git apply --recount` before model repair.
+- [x] Add structured full-file edits to WorkerPatch so small models are not forced to produce fragile unified diffs for simple bounded edits.
+- [x] Cover the worker dispatch and repair prompts with regression tests.
+- [x] Pass Phase 1 smoke criteria: generated plan, approved task, worker output applied, and task moved to review.
+
+## Phase 2: First-Class IDE Workflow
+
+Goal: make the single-worker loop feel like an IDE workflow instead of a command sequence.
+
+- [x] Add a task detail view with packet, context files, events, verification output, and review state.
+- [x] Add plan editing commands for task fields, allowed paths, context files, and verification before approval.
+- [x] Add an interactive changed-files/diff review workflow before final reviewer approval.
+- [x] Add a command palette view that groups slash commands by workflow stage.
+- [x] Add persisted run artifacts for generated plans, worker packets, worker outputs, diffs, verification, and reviews.
+- [x] Add project file browsing actions that can attach files/ranges to the current plan task.
+- [x] Add reviewer-driven repair dispatch that can use either patches or structured file edits.
+- [x] Add clearer model role telemetry: provider, model, latency, raw response size, and repair attempts per task event.
+- [x] Add cancellation and timeout controls for async plan/worker calls.
+- [x] Add Phase 2 smoke: edit a real repo file through plan generation, worker dispatch, review, repair if needed, and final-review export.
+
+## Phase 3: Planner And Execution Hardening
+
+Goal: make generated plans and model runs reliable enough for repeated real-repo use.
+
+- [x] Filter generated/imported verification commands through the same allowlist used by execution.
+- [x] Prefer discovered allowlisted project commands instead of defaulting every worker packet to `go test ./...`.
+- [x] Tell the orchestrator to leave verification empty when no allowlisted command applies.
+- [x] Add reviewer model execution so `/reviewer-input` can be dispatched directly.
+- [x] Add token usage telemetry where providers expose usage.
+- [x] Add retry/backoff policy for transient model endpoint failures.
+- [x] Add Phase 3 smoke for generated plan verification on Go, Python, and no-build repos.
 
 ## Later Extensions
 
@@ -156,6 +191,6 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Add worker patch repair for invalid model-produced diffs.
-2. Move `/plan generate` and `/run-worker` onto async command paths with progress state and cancellation.
-3. Keep parallel workers in Later Extensions until single-worker reliability is proven.
+1. Capture the full Go transport error from live TUI model calls outside the alternate-screen UI.
+2. Decide whether the model client needs transport tuning before the next live smoke.
+3. Decide the next phase boundary: live model reliability polish or first pass at MCP/skills hooks.

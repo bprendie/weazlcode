@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -41,10 +42,25 @@ func ParseWorkerPatchJSON(raw []byte) (WorkerPatch, error) {
 	if dec.More() {
 		return WorkerPatch{}, fmt.Errorf("worker patch JSON contains trailing data")
 	}
+	patch = NormalizeWorkerPatch(patch)
 	if err := ValidateWorkerPatch(patch); err != nil {
 		return WorkerPatch{}, err
 	}
 	return patch, nil
+}
+
+func NormalizeWorkerPatch(patch WorkerPatch) WorkerPatch {
+	patch.TaskID = strings.TrimSpace(patch.TaskID)
+	patch.Summary = strings.TrimSpace(patch.Summary)
+	patch.Blocker = strings.TrimSpace(patch.Blocker)
+	for i := range patch.Files {
+		patch.Files[i].Path = strings.TrimSpace(patch.Files[i].Path)
+	}
+	switch strings.ToLower(patch.Blocker) {
+	case "none", "no", "n/a", "na", "null", "nil":
+		patch.Blocker = ""
+	}
+	return patch
 }
 
 func ParseReviewVerdictJSON(raw []byte) (ReviewVerdict, error) {
@@ -80,9 +96,38 @@ func PrepareImportedPlan(plan Plan, sessionID, projectRoot string, idFunc func()
 			plan.Tasks[i].ID = idFunc()
 		}
 		plan.Tasks[i].PlanID = plan.ID
+		plan.Tasks[i].AllowedPaths = normalizePlanPaths(plan.Tasks[i].AllowedPaths, projectRoot)
+		plan.Tasks[i].ForbiddenPaths = normalizePlanPaths(plan.Tasks[i].ForbiddenPaths, projectRoot)
+		plan.Tasks[i].ContextFiles = normalizePlanPaths(plan.Tasks[i].ContextFiles, projectRoot)
 		if strings.TrimSpace(plan.Tasks[i].Status) == "" {
 			plan.Tasks[i].Status = TaskStatusPending
 		}
 	}
 	return plan
+}
+
+func normalizePlanPaths(paths []string, projectRoot string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+	root := filepath.Clean(projectRoot)
+	normalized := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		clean := filepath.Clean(path)
+		if filepath.IsAbs(clean) {
+			if rel, err := filepath.Rel(root, clean); err == nil && relInsideRoot(rel) {
+				clean = rel
+			}
+		}
+		normalized = append(normalized, filepath.ToSlash(clean))
+	}
+	return normalized
+}
+
+func relInsideRoot(rel string) bool {
+	return rel == "." || (rel != ".." && !strings.HasPrefix(filepath.ToSlash(rel), "../"))
 }

@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
 
@@ -20,6 +22,7 @@ import (
 )
 
 const maxRepairAttempts = 2
+const maxWorkerPatchDiffRepairAttempts = 2
 
 func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(input), "/") {
@@ -40,6 +43,10 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	switch name {
 	case "", "help", "?":
 		m.setIDEView("help", slashHelp())
+	case "commands", "palette":
+		m.setIDEView("commands", commandPaletteText())
+	case "cancel":
+		return m.cancelModelCommand()
 	case "project":
 		m.setIDEView("project", m.projectCommandText())
 	case "models":
@@ -56,6 +63,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("files", m.filesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "preview":
 		m.setIDEView("preview", m.previewCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "attach":
+		return m.attachFileCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "lsp":
 		m.setIDEView("lsp", m.lspCommandText())
 	case "diagnostics":
@@ -86,6 +95,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.handlePlanCommand(fields[1:], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "tasks":
 		m.setIDEView("tasks", m.tasksCommandText())
+	case "task":
+		m.setIDEView("task", m.taskDetailCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "packet":
 		m.setIDEView("packet", m.packetCommandText())
 	case "approve":
@@ -100,6 +111,10 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "reviewer-input":
 		m.setIDEView("reviewer-input", m.reviewerInputCommandText())
+	case "run-reviewer":
+		return m.runReviewerModel()
+	case "review-diff":
+		m.setIDEView("review-diff", m.reviewDiffCommandText())
 	case "review":
 		return m.importReviewVerdict(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "sessions":
@@ -168,10 +183,26 @@ func (m *model) addSystemNote(text string) {
 	m.viewport.GotoBottom()
 }
 
+func (m model) cancelModelCommand() (tea.Model, tea.Cmd, bool) {
+	if m.cancelModel == nil || m.activeModelRunID == 0 {
+		m.status = "nothing to cancel"
+		return m, nil, true
+	}
+	m.cancelModel()
+	m.cancelModel = nil
+	m.activeModelRunID = 0
+	m.thinking = false
+	m.addSystemNote("Cancelled active model request.")
+	m.status = "model cancelled"
+	return m, nil, true
+}
+
 func slashHelp() string {
 	return strings.Join([]string{
 		"Slash commands:",
 		"/help - show commands",
+		"/commands - show grouped command palette",
+		"/cancel - cancel the active model request",
 		"/project - show active project",
 		"/models - show model role mapping",
 		"/tools - list enabled tools",
@@ -180,6 +211,7 @@ func slashHelp() string {
 		"/outputs - show recent task events and tool outputs",
 		"/files [query] - fuzzy-find project files",
 		"/preview <path> - preview a project file",
+		"/attach [task] <path> [start-end] - attach a file or line range to a draft task",
 		"/lsp - show detected language servers",
 		"/diagnostics - show project diagnostics",
 		"/symbols [query] - search project symbols",
@@ -195,8 +227,10 @@ func slashHelp() string {
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/plan generate <request> - ask orchestrator role for a strict draft plan",
+		"/plan edit <task> <field> <value> - edit draft task fields before approval",
 		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
+		"/task [n|id] - show task detail, packet, events, and review state",
 		"/packet - show local-worker packet for the first pending task",
 		"/approve - approve the latest draft plan",
 		"/reject [reason] - block the latest plan",
@@ -204,7 +238,9 @@ func slashHelp() string {
 		"/run-worker - ask configured worker role for a WorkerPatch JSON",
 		"/worker-patch <json> - import a worker patch or blocker for the running task",
 		"/reviewer-input - show frontier-review payload for the reviewing task",
-		"/review <json> - import a reviewer verdict for the reviewing task",
+		"/run-reviewer - ask configured reviewer role for a verdict",
+		"/review-diff - inspect changed files and diff before review",
+		"/review <json|approve|needs-fix|blocked> - import or enter a reviewer verdict",
 		"/sessions - open sessions",
 		"/workspaces - open workspace saves",
 		"/new - start a new session",
@@ -213,6 +249,29 @@ func slashHelp() string {
 		"/copy - release mouse for terminal selection",
 		"/mouse - restore mouse scrolling",
 	}, "\n")
+}
+
+func commandPaletteText() string {
+	groups := []struct {
+		Title    string
+		Commands []string
+	}{
+		{"Plan", []string{"/plan", "/plan generate <request>", "/plan edit <task> <field> <value>", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
+		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/worker-patch <json>"}},
+		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
+		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
+		{"Git", []string{"/diff", "/commit-message", "/commit yes"}},
+		{"Session", []string{"/chat", "/cancel", "/sessions", "/workspaces", "/new", "/clear", "/trim", "/copy"}},
+	}
+	var b strings.Builder
+	b.WriteString("Command palette:\n")
+	for _, group := range groups {
+		fmt.Fprintf(&b, "\n%s:\n", group.Title)
+		for _, command := range group.Commands {
+			fmt.Fprintf(&b, "- %s\n", command)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
@@ -347,6 +406,11 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 		Message: workerStartMessage(task),
 		Payload: payload,
 	})
+	packetKind := "worker_packet"
+	if workerStartEventType(task) == "repair_start" {
+		packetKind = "repair_packet"
+	}
+	m.writeRunArtifact(packetKind, packet)
 	m.addSystemNote("Worker dispatch prepared:\n" + renderJSON(packet))
 	m.status = "task running"
 	return m, nil, true
@@ -364,10 +428,18 @@ func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
 		m.status = "worker patch failed"
 		return m, nil, true
 	}
-	return m.applyWorkerPatch(patch)
+	return m.applyWorkerPatch(patch, false)
 }
 
-func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, bool) {
+func (m model) applyWorkerPatch(patch coding.WorkerPatch, repairInvalidDiff bool) (tea.Model, tea.Cmd, bool) {
+	return m.applyWorkerPatchWithTelemetry(patch, repairInvalidDiff, nil)
+}
+
+func (m model) applyWorkerPatchWithTelemetry(patch coding.WorkerPatch, repairInvalidDiff bool, telemetry *modelTelemetry) (tea.Model, tea.Cmd, bool) {
+	return m.applyWorkerPatchWithRepair(patch, repairInvalidDiff, 0, nil, telemetry)
+}
+
+func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvalidDiff bool, repairAttempts int, applyErrors []error, telemetry *modelTelemetry) (tea.Model, tea.Cmd, bool) {
 	plan, ok, err := m.store.LatestPlan(m.session.ID)
 	if err != nil {
 		m.addSystemNote("Worker patch error: " + err.Error())
@@ -390,6 +462,15 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 		m.status = "worker patch failed"
 		return m, nil, true
 	}
+	if telemetry != nil {
+		payload, _ := json.Marshal(telemetry)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_model",
+			Message: fmt.Sprintf("%s/%s in %dms", telemetry.Provider, telemetry.Model, telemetry.LatencyMS),
+			Payload: payload,
+		})
+	}
 	if strings.TrimSpace(patch.Blocker) != "" {
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Worker patch error: " + err.Error())
@@ -408,14 +489,29 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 		return m, nil, true
 	}
 	paths := coding.PatchPaths(patch.Patch)
+	if len(patch.Files) > 0 {
+		paths = coding.WorkerFileEditPaths(patch.Files)
+	}
 	if err := coding.ValidatePatchPaths(paths, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
 		m.addSystemNote("Worker patch rejected: " + err.Error())
 		m.status = "worker patch rejected"
 		return m, nil, true
 	}
-	result, err := coding.ApplyPatch(m.project.Root, patch.Patch)
+	result, err := applyWorkerPatchContent(m.project.Root, patch)
 	if err != nil {
-		m.addSystemNote("Worker patch apply error: " + err.Error())
+		applyErrors = append(applyErrors, err)
+		if len(patch.Files) == 0 && repairInvalidDiff && repairAttempts < maxWorkerPatchDiffRepairAttempts {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			repaired, repairErr := m.repairWorkerPatchDiff(ctx, task, patch, err)
+			if repairErr == nil {
+				return m.applyWorkerPatchWithRepair(repaired, true, repairAttempts+1, applyErrors, nil)
+			}
+			m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, repairErr))
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
+		m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, nil))
 		m.status = "worker patch failed"
 		return m, nil, true
 	}
@@ -441,6 +537,18 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 		Message: emptyFallback(patch.Summary, "Worker patch applied; task is ready for review."),
 		Payload: payload,
 	})
+	m.writeRunArtifact("worker_output", struct {
+		TaskID string                  `json:"task_id"`
+		Patch  coding.WorkerPatch      `json:"patch"`
+		Result coding.PatchApplyResult `json:"result"`
+		Paths  []string                `json:"paths"`
+	}{TaskID: task.ID, Patch: patch, Result: result, Paths: result.Paths})
+	if diff, err := m.gitDiff(); err == nil {
+		m.writeRunArtifact("diff", struct {
+			TaskID string `json:"task_id"`
+			Diff   string `json:"diff"`
+		}{TaskID: task.ID, Diff: diff})
+	}
 	verification, err := m.runTaskVerification(task)
 	if err != nil {
 		payload, _ := json.Marshal(struct {
@@ -452,6 +560,10 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 			Message: err.Error(),
 			Payload: payload,
 		})
+		m.writeRunArtifact("verification_error", struct {
+			TaskID string `json:"task_id"`
+			Error  string `json:"error"`
+		}{TaskID: task.ID, Error: err.Error()})
 		m.addSystemNote("Verification error: " + err.Error())
 		m.status = "verification failed"
 		return m, nil, true
@@ -464,6 +576,10 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 			Message: fmt.Sprintf("Ran %d verification command(s).", len(verification)),
 			Payload: payload,
 		})
+		m.writeRunArtifact("verification", struct {
+			TaskID       string               `json:"task_id"`
+			Verification []verificationResult `json:"verification"`
+		}{TaskID: task.ID, Verification: verification})
 	}
 	m.addSystemNote("Worker patch applied; task is ready for review:\n" + renderJSON(struct {
 		Patch        coding.PatchApplyResult `json:"patch"`
@@ -474,6 +590,13 @@ func (m model) applyWorkerPatch(patch coding.WorkerPatch) (tea.Model, tea.Cmd, b
 	}))
 	m.status = "task reviewing"
 	return m, nil, true
+}
+
+func applyWorkerPatchContent(projectRoot string, patch coding.WorkerPatch) (coding.PatchApplyResult, error) {
+	if len(patch.Files) > 0 {
+		return coding.ApplyFileEdits(projectRoot, patch.Files)
+	}
+	return coding.ApplyPatch(projectRoot, patch.Patch)
 }
 
 func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
@@ -500,26 +623,66 @@ func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
 		m.status = "worker run failed"
 		return m, nil, true
 	}
+	m.thinking = true
+	m.working.Spinner = spinner.Jump
+	m.status = "running worker"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	raw, err := m.generateWorkerPatchJSON(ctx, packet)
-	if err != nil {
-		m.addSystemNote("Worker model error: " + err.Error())
-		m.status = "worker run failed"
-		return m, nil, true
-	}
-	patch, err := m.workerPatchFromGeneratedJSON(ctx, packet, raw)
-	if err != nil {
-		m.addSystemNote("Worker model patch error: " + err.Error() + "\n\nRaw response:\n" + raw)
-		m.status = "worker run failed"
-		return m, nil, true
-	}
-	return m.applyWorkerPatch(patch)
+	m.modelRunID++
+	m.activeModelRunID = m.modelRunID
+	m.cancelModel = cancel
+	return m, tea.Batch(m.runWorkerModelCmd(ctx, m.activeModelRunID, packet), m.working.Tick), true
 }
 
-func (m model) generateWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket) (string, error) {
+func (m model) runWorkerModelCmd(ctx context.Context, runID int, packet coding.TaskPacket) tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+		raw, usage, err := m.generateWorkerPatchJSON(ctx, packet)
+		telemetry := m.modelTelemetry("worker", time.Since(start), len(raw), 0, usage)
+		if err != nil {
+			return workerRunMsg{runID: runID, telemetry: telemetry, err: err}
+		}
+		patch, repairAttempts, err := m.workerPatchFromGeneratedJSON(ctx, packet, raw)
+		telemetry.JSONRepairAttempts = repairAttempts
+		if err != nil {
+			return workerRunMsg{runID: runID, raw: raw, telemetry: telemetry, err: fmt.Errorf("%w\n\nRaw response:\n%s", err, raw)}
+		}
+		return workerRunMsg{runID: runID, raw: raw, patch: patch, telemetry: telemetry}
+	}
+}
+
+func (m model) modelTelemetry(role string, latency time.Duration, rawChars, repairAttempts int, usage llm.Usage) modelTelemetry {
+	providerName := m.providerNameForRole(role)
+	provider := m.cfg.ProviderForRole(role)
+	return modelTelemetry{
+		Role:               role,
+		Provider:           providerName,
+		Model:              provider.Model,
+		LatencyMS:          latency.Milliseconds(),
+		RawChars:           rawChars,
+		InputTokens:        usage.InputTokens,
+		OutputTokens:       usage.OutputTokens,
+		JSONRepairAttempts: repairAttempts,
+	}
+}
+
+func (m model) providerNameForRole(role string) string {
+	switch role {
+	case "orchestrator":
+		return emptyFallback(m.cfg.ModelRoles.Orchestrator, m.cfg.ActiveProvider)
+	case "worker":
+		return emptyFallback(m.cfg.ModelRoles.Worker, m.cfg.ActiveProvider)
+	case "reviewer":
+		return emptyFallback(m.cfg.ModelRoles.Reviewer, m.cfg.ActiveProvider)
+	case "summarizer":
+		return emptyFallback(m.cfg.ModelRoles.Summarizer, m.cfg.ActiveProvider)
+	default:
+		return m.cfg.ActiveProvider
+	}
+}
+
+func (m model) generateWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket) (string, llm.Usage, error) {
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	return client.Complete(ctx, workerPatchMessages(packet), 4096)
+	return client.CompleteWithUsage(ctx, workerPatchMessages(packet), 4096)
 }
 
 func (m model) repairWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket, raw string, parseErr error) (string, error) {
@@ -527,21 +690,53 @@ func (m model) repairWorkerPatchJSON(ctx context.Context, packet coding.TaskPack
 	return client.Complete(ctx, workerPatchRepairMessages(packet, raw, parseErr), 4096)
 }
 
-func (m model) workerPatchFromGeneratedJSON(ctx context.Context, packet coding.TaskPacket, raw string) (coding.WorkerPatch, error) {
+func (m model) workerPatchFromGeneratedJSON(ctx context.Context, packet coding.TaskPacket, raw string) (coding.WorkerPatch, int, error) {
 	patch, err := coding.ParseWorkerPatchJSON([]byte(extractJSONObject(raw)))
 	if err == nil {
-		return patch, nil
+		return patch, 0, nil
 	}
 	initialErr := err
 	repaired, repairErr := m.repairWorkerPatchJSON(ctx, packet, raw, initialErr)
 	if repairErr != nil {
-		return coding.WorkerPatch{}, fmt.Errorf("%v; repair error: %w", initialErr, repairErr)
+		return coding.WorkerPatch{}, 1, fmt.Errorf("%v; repair error: %w", initialErr, repairErr)
 	}
 	patch, err = coding.ParseWorkerPatchJSON([]byte(extractJSONObject(repaired)))
 	if err != nil {
-		return coding.WorkerPatch{}, fmt.Errorf("%v; repair parse error: %w", initialErr, err)
+		return coding.WorkerPatch{}, 1, fmt.Errorf("%v; repair parse error: %w", initialErr, err)
 	}
-	return patch, nil
+	return patch, 1, nil
+}
+
+func (m model) repairWorkerPatchDiff(ctx context.Context, task coding.Task, patch coding.WorkerPatch, applyErr error) (coding.WorkerPatch, error) {
+	packet, err := m.buildWorkerPacketForRun(task)
+	if err != nil {
+		return coding.WorkerPatch{}, err
+	}
+	client := llm.New(m.cfg.ProviderForRole("worker"))
+	raw, err := client.Complete(ctx, workerPatchDiffRepairMessages(packet, patch, applyErr), 4096)
+	if err != nil {
+		return coding.WorkerPatch{}, err
+	}
+	repaired, err := coding.ParseWorkerPatchJSON([]byte(extractJSONObject(raw)))
+	if err != nil {
+		return coding.WorkerPatch{}, err
+	}
+	if repaired.TaskID != patch.TaskID {
+		return coding.WorkerPatch{}, fmt.Errorf("repaired patch task_id %q does not match %q", repaired.TaskID, patch.TaskID)
+	}
+	return repaired, nil
+}
+
+func formatWorkerPatchApplyFailure(applyErrors []error, repairErr error) string {
+	var b strings.Builder
+	b.WriteString("Worker patch apply error:")
+	for i, err := range applyErrors {
+		fmt.Fprintf(&b, "\n%d. %s", i+1, err)
+	}
+	if repairErr != nil {
+		fmt.Fprintf(&b, "\n\nPatch repair error: %s", repairErr)
+	}
+	return b.String()
 }
 
 func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
@@ -552,15 +747,44 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 				"You are the WeazlCode local worker.",
 				"Return a WorkerPatch JSON object.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"blocker\":\"...\"}.",
-				"If you can complete the task, return a unified diff in patch and leave blocker empty.",
-				"If you need missing context or cannot safely complete the task, set blocker and leave patch empty.",
+				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
+				"For small file edits, prefer files with full replacement content and leave patch empty.",
+				"For larger edits, return a unified diff in patch and leave files empty.",
+				"If you need missing context or cannot safely complete the task, set blocker and leave patch/files empty.",
+				"If the task packet includes Repair focus, make only the focused repair requested by the reviewer and keep the original allowed_paths scope.",
+				"Unified diffs must be valid for git apply: include diff --git, ---/+++ file headers, @@ hunk headers with correct line counts, and unchanged context lines.",
 				"Do not edit outside allowed_paths. Do not include prose outside JSON.",
 			}, "\n"),
 		},
 		{
 			Role:    "user",
 			Content: "Task packet:\n" + renderJSON(packet),
+		},
+	}
+}
+
+func workerPatchDiffRepairMessages(packet coding.TaskPacket, patch coding.WorkerPatch, applyErr error) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You repair invalid unified diffs for WeazlCode WorkerPatch JSON.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
+				"Keep the same task_id.",
+				"Prefer files with full replacement content for small edits; otherwise return a corrected unified diff in patch.",
+				"Set blocker if you cannot safely repair it.",
+				"Unified diffs must be valid for git apply: include diff --git, ---/+++ file headers, @@ hunk headers with correct line counts, and unchanged context lines.",
+				"Do not include prose outside JSON.",
+			}, "\n"),
+		},
+		{
+			Role: "user",
+			Content: fmt.Sprintf("Task packet:\n%s\n\nApply error:\n%s\n\nInvalid WorkerPatch:\n%s",
+				renderJSON(packet),
+				applyErr,
+				renderJSON(patch),
+			),
 		},
 	}
 }
@@ -572,9 +796,10 @@ func workerPatchRepairMessages(packet coding.TaskPacket, raw string, parseErr er
 			Content: strings.Join([]string{
 				"You repair WeazlCode WorkerPatch JSON.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"blocker\":\"...\"}.",
+				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
 				"Use the task_id from the task packet.",
-				"If a safe patch is not possible, set blocker and leave patch empty.",
+				"For small file edits, prefer files with full replacement content and leave patch empty.",
+				"If a safe patch is not possible, set blocker and leave patch/files empty.",
 				"Do not include prose outside JSON.",
 			}, "\n"),
 		},
@@ -595,7 +820,7 @@ type verificationResult struct {
 }
 
 func (m model) runTaskVerification(task coding.Task) ([]verificationResult, error) {
-	commands := taskVerification(task)
+	commands := m.taskVerification(task)
 	if len(commands) == 0 {
 		return nil, nil
 	}
@@ -634,11 +859,9 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 		DefaultAllowed: []string{
 			".",
 		},
-		DefaultTools: allowedTools,
-		DefaultVerify: []string{
-			"go test ./...",
-		},
-		Diagnostics: diagnostics,
+		DefaultTools:  allowedTools,
+		DefaultVerify: m.defaultVerificationCommands(),
+		Diagnostics:   diagnostics,
 	})
 }
 
@@ -728,11 +951,64 @@ func taskAllowedPaths(task coding.Task) []string {
 	return task.AllowedPaths
 }
 
-func taskVerification(task coding.Task) []string {
+func (m model) taskVerification(task coding.Task) []string {
 	if len(task.Verification) == 0 {
-		return []string{"go test ./..."}
+		return m.defaultVerificationCommands()
 	}
 	return task.Verification
+}
+
+func (m model) defaultVerificationCommands() []string {
+	commands := project.DiscoverCommands(m.project.Root)
+	out := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if allowlistedVerificationCommand(command) {
+			out = append(out, strings.TrimSpace(command))
+		}
+	}
+	return out
+}
+
+func normalizePlanVerification(plan *coding.Plan) {
+	for i := range plan.Tasks {
+		plan.Tasks[i].Verification = filterVerificationCommands(plan.Tasks[i].Verification)
+	}
+}
+
+func filterVerificationCommands(commands []string) []string {
+	out := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if allowlistedVerificationCommand(command) {
+			out = append(out, strings.TrimSpace(command))
+		}
+	}
+	return out
+}
+
+func allowlistedVerificationCommand(commandText string) bool {
+	name, args, err := splitVerificationCommand(commandText)
+	if err != nil {
+		return false
+	}
+	switch name {
+	case "go":
+		return len(args) > 0 && (args[0] == "test" || args[0] == "build" || args[0] == "vet")
+	case "npm":
+		return len(args) > 0 && (args[0] == "test" || args[0] == "run")
+	case "python", "python3":
+		if len(args) < 2 || args[0] != "-m" {
+			return false
+		}
+		return args[1] == "pytest" || args[1] == "unittest" || args[1] == "compileall"
+	case "pytest", "shellcheck":
+		return true
+	case "cargo":
+		return len(args) > 0 && (args[0] == "test" || args[0] == "build" || args[0] == "check" || args[0] == "clippy")
+	case "make":
+		return len(args) > 0 && (args[0] == "test" || args[0] == "check" || args[0] == "lint" || args[0] == "build")
+	default:
+		return false
+	}
 }
 
 func splitVerificationCommand(commandText string) (string, []string, error) {
@@ -749,6 +1025,43 @@ func (m model) reviewerInputCommandText() string {
 		return "Reviewer input error: " + err.Error()
 	}
 	return "Reviewer input:\n" + renderJSON(input)
+}
+
+func (m model) reviewDiffCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Review diff error: " + err.Error()
+	}
+	if !ok {
+		return "Review diff:\nNo plan found."
+	}
+	task, ok := firstReviewingTask(plan.Tasks)
+	if !ok {
+		return "Review diff:\nNo reviewing task found. Run a worker patch first."
+	}
+	files, filesErr := m.changedFiles()
+	diff, diffErr := m.gitDiff()
+	events, _ := m.store.TaskEvents(task.ID)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Review diff: %s\nstatus: %s\nplan: %s\n\nGoal:\n%s\n", task.Title, task.Status, plan.Title, task.Goal)
+	if filesErr != nil {
+		fmt.Fprintf(&b, "\nChanged files error: %s\n", filesErr)
+	} else {
+		fmt.Fprintf(&b, "\nChanged files:\n%s", emptyFallback(files, "No changed files.\n"))
+	}
+	if len(events) > 0 {
+		fmt.Fprintf(&b, "\nEvents:\n%s\n", taskEventsSummary(events))
+	}
+	b.WriteString("\nReview commands:\n")
+	b.WriteString("- /review approve [summary]\n")
+	b.WriteString("- /review needs-fix <issue>[;; issue]\n")
+	b.WriteString("- /review blocked <summary>\n")
+	if diffErr != nil {
+		fmt.Fprintf(&b, "\nDiff error: %s", diffErr)
+	} else {
+		fmt.Fprintf(&b, "\nDiff:\n%s", emptyFallback(diff, "No diff."))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
@@ -791,18 +1104,79 @@ func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
 	}, nil
 }
 
+func (m model) runReviewerModel() (tea.Model, tea.Cmd, bool) {
+	input, err := m.buildReviewerInput()
+	if err != nil {
+		m.addSystemNote("Reviewer run error: " + err.Error())
+		m.status = "reviewer run failed"
+		return m, nil, true
+	}
+	m.thinking = true
+	m.working.Spinner = spinner.Jump
+	m.status = "running reviewer"
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	m.modelRunID++
+	m.activeModelRunID = m.modelRunID
+	m.cancelModel = cancel
+	return m, tea.Batch(m.runReviewerModelCmd(ctx, m.activeModelRunID, input), m.working.Tick), true
+}
+
+func (m model) runReviewerModelCmd(ctx context.Context, runID int, input coding.ReviewerInput) tea.Cmd {
+	return func() tea.Msg {
+		start := time.Now()
+		raw, usage, err := m.generateReviewVerdictJSON(ctx, input)
+		telemetry := m.modelTelemetry("reviewer", time.Since(start), len(raw), 0, usage)
+		if err != nil {
+			return reviewerRunMsg{runID: runID, raw: raw, telemetry: telemetry, err: err}
+		}
+		verdict, err := coding.ParseReviewVerdictJSON([]byte(extractJSONObject(raw)))
+		if err != nil {
+			return reviewerRunMsg{runID: runID, raw: raw, telemetry: telemetry, err: fmt.Errorf("%w\n\nRaw response:\n%s", err, raw)}
+		}
+		return reviewerRunMsg{runID: runID, raw: raw, verdict: verdict, telemetry: telemetry}
+	}
+}
+
+func (m model) generateReviewVerdictJSON(ctx context.Context, input coding.ReviewerInput) (string, llm.Usage, error) {
+	client := llm.New(m.cfg.ProviderForRole("reviewer"))
+	return client.CompleteWithUsage(ctx, reviewerVerdictMessages(input), 2048)
+}
+
+func reviewerVerdictMessages(input coding.ReviewerInput) []llm.ChatMessage {
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You are the WeazlCode frontier reviewer.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"verdict\":\"approve|needs_fix|blocked\",\"summary\":\"...\",\"issues\":[\"...\"]}.",
+				"Approve only when the diff satisfies the task packet, allowed paths, verification output, and acceptance checks.",
+				"Use needs_fix for focused repairable issues. Use blocked only for missing context or user decisions.",
+			}, "\n"),
+		},
+		{
+			Role:    "user",
+			Content: "Reviewer input:\n" + renderJSON(input),
+		},
+	}
+}
+
 func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 	if raw == "" {
-		m.addSystemNote("Usage: /review <json>")
+		m.addSystemNote("Usage: /review <json|approve|needs-fix|blocked>")
 		m.status = "review usage"
 		return m, nil, true
 	}
-	verdict, err := coding.ParseReviewVerdictJSON([]byte(raw))
+	verdict, err := parseReviewCommand(raw)
 	if err != nil {
 		m.addSystemNote("Review import error: " + err.Error())
 		m.status = "review failed"
 		return m, nil, true
 	}
+	return m.applyReviewVerdict(verdict, nil)
+}
+
+func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *modelTelemetry) (tea.Model, tea.Cmd, bool) {
 	plan, ok, err := m.store.LatestPlan(m.session.ID)
 	if err != nil {
 		m.addSystemNote("Review error: " + err.Error())
@@ -820,6 +1194,15 @@ func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 		m.status = "no reviewing task"
 		return m, nil, true
 	}
+	if telemetry != nil {
+		payload, _ := json.Marshal(telemetry)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "reviewer_model",
+			Message: fmt.Sprintf("%s/%s in %dms", telemetry.Provider, telemetry.Model, telemetry.LatencyMS),
+			Payload: payload,
+		})
+	}
 	payload, _ := json.Marshal(verdict)
 	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 		TaskID:  task.ID,
@@ -827,6 +1210,10 @@ func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 		Message: verdict.Summary,
 		Payload: payload,
 	})
+	m.writeRunArtifact("review", struct {
+		TaskID  string               `json:"task_id"`
+		Verdict coding.ReviewVerdict `json:"verdict"`
+	}{TaskID: task.ID, Verdict: verdict})
 	switch verdict.Verdict {
 	case coding.ReviewApprove:
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusDone); err != nil {
@@ -877,6 +1264,11 @@ func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 			Message: repairRequestText(verdict, attempt),
 			Payload: repairPayload,
 		})
+		m.writeRunArtifact("repair_request", struct {
+			TaskID  string               `json:"task_id"`
+			Attempt int                  `json:"attempt"`
+			Verdict coding.ReviewVerdict `json:"verdict"`
+		}{TaskID: task.ID, Attempt: attempt, Verdict: verdict})
 		m.addSystemNote("Reviewer requested focused repair:\n" + renderJSON(verdict))
 		m.status = "repair requested"
 	case coding.ReviewBlocked:
@@ -891,10 +1283,51 @@ func (m model) importReviewVerdict(raw string) (tea.Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
+func parseReviewCommand(raw string) (coding.ReviewVerdict, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "{") {
+		return coding.ParseReviewVerdictJSON([]byte(raw))
+	}
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return coding.ReviewVerdict{}, fmt.Errorf("review command is empty")
+	}
+	command := strings.ReplaceAll(strings.ToLower(fields[0]), "-", "_")
+	detail := strings.TrimSpace(strings.TrimPrefix(raw, fields[0]))
+	switch command {
+	case "approve", "approved":
+		if detail == "" {
+			detail = "Approved."
+		}
+		return coding.ReviewVerdict{Verdict: coding.ReviewApprove, Summary: detail}, nil
+	case "needs_fix", "fix", "needsfix":
+		if detail == "" {
+			return coding.ReviewVerdict{}, fmt.Errorf("needs-fix requires at least one issue")
+		}
+		issues := splitPlanEditList(detail)
+		return coding.ReviewVerdict{Verdict: coding.ReviewNeedsFix, Summary: strings.Join(issues, "; "), Issues: issues}, nil
+	case "blocked", "block":
+		if detail == "" {
+			detail = "Blocked."
+		}
+		return coding.ReviewVerdict{Verdict: coding.ReviewBlocked, Summary: detail}, nil
+	default:
+		return coding.ReviewVerdict{}, fmt.Errorf("unknown review command %q", fields[0])
+	}
+}
+
 func (m model) gitDiff() (string, error) {
 	tool, ok := m.toolRegistry.Get("git_diff")
 	if !ok {
 		return "", fmt.Errorf("git_diff tool is not registered")
+	}
+	return tool.Execute(context.Background(), map[string]any{"cwd": m.project.Root})
+}
+
+func (m model) changedFiles() (string, error) {
+	tool, ok := m.toolRegistry.Get("list_changed_files")
+	if !ok {
+		return "", fmt.Errorf("list_changed_files tool is not registered")
 	}
 	return tool.Execute(context.Background(), map[string]any{"cwd": m.project.Root})
 }
@@ -1185,6 +1618,52 @@ func (m model) exportRunCommandText() string {
 	return "Exported run artifact:\n" + path
 }
 
+func (m model) writeRunArtifact(kind string, payload any) {
+	if strings.TrimSpace(m.project.StateDir) == "" || strings.TrimSpace(m.session.ID) == "" {
+		return
+	}
+	name := time.Now().Format("20060102-150405.000000000") + "-" + safeArtifactName(kind) + ".json"
+	dir := filepath.Join(m.project.StateDir, "runs", safeArtifactName(m.session.ID))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	body, err := json.MarshalIndent(struct {
+		Kind      string `json:"kind"`
+		SessionID string `json:"session_id"`
+		CreatedAt string `json:"created_at"`
+		Payload   any    `json:"payload"`
+	}{
+		Kind:      kind,
+		SessionID: m.session.ID,
+		CreatedAt: time.Now().Format(time.RFC3339Nano),
+		Payload:   payload,
+	}, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, name), append(body, '\n'), 0o600)
+}
+
+func safeArtifactName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "artifact"
+	}
+	var b strings.Builder
+	for _, r := range raw {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "artifact"
+	}
+	return out
+}
+
 func latestReviewVerdict(events []coding.TaskEvent) (coding.ReviewVerdict, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		if events[i].Type == "reviewer_verdict" {
@@ -1211,6 +1690,9 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 	if len(args) > 0 && strings.ToLower(args[0]) == "generate" {
 		request := strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0]))
 		return m.generatePlanCommand(request)
+	}
+	if len(args) > 0 && strings.ToLower(args[0]) == "edit" {
+		return m.editPlanCommand(strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0])))
 	}
 	if len(args) > 0 && strings.ToLower(args[0]) == "draft" {
 		title := strings.TrimSpace(strings.Join(args[1:], " "))
@@ -1244,6 +1726,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 		if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
 			plan = saved
 		}
+		m.writeRunArtifact("plan", plan)
 		m.addSystemNote(renderPlan(plan))
 		m.status = "draft plan created"
 		return m, nil, true
@@ -1262,6 +1745,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 			return m, nil, true
 		}
 		plan = coding.PrepareImportedPlan(plan, m.session.ID, m.project.Root, uuid.NewString)
+		normalizePlanVerification(&plan)
 		if err := coding.ValidatePlan(plan); err != nil {
 			m.addSystemNote("Plan import error: " + err.Error())
 			m.status = "plan import failed"
@@ -1274,6 +1758,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 		if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
 			plan = saved
 		}
+		m.writeRunArtifact("plan", plan)
 		m.addSystemNote(renderPlan(plan))
 		m.status = "plan imported"
 		return m, nil, true
@@ -1282,47 +1767,282 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 	return m, nil, true
 }
 
+func (m model) editPlanCommand(raw string) (tea.Model, tea.Cmd, bool) {
+	taskSelector, field, value, ok := splitPlanEditArgs(raw)
+	if !ok {
+		m.addSystemNote("Usage: /plan edit <task> <field> <value>\nFields: title, goal, allowed_paths, forbidden_paths, context_files, verification, checks.")
+		m.status = "plan edit usage"
+		return m, nil, true
+	}
+	plan, found, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Plan edit error: " + err.Error())
+		m.status = "plan edit failed"
+		return m, nil, true
+	}
+	if !found {
+		m.addSystemNote("No plan. Use `/plan draft`, `/plan generate`, or `/plan import` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if plan.Status != coding.PlanStatusDraft {
+		m.addSystemNote("Only draft plans can be edited. Use `/plan` to inspect the current status.")
+		m.status = "plan edit blocked"
+		return m, nil, true
+	}
+	_, index, ok := selectTask(plan.Tasks, taskSelector)
+	if !ok {
+		m.addSystemNote(fmt.Sprintf("Task %q not found. Use `/tasks` to list task numbers and ids.", taskSelector))
+		m.status = "task not found"
+		return m, nil, true
+	}
+	if err := applyPlanTaskEdit(&plan.Tasks[index], field, value); err != nil {
+		m.addSystemNote("Plan edit error: " + err.Error())
+		m.status = "plan edit failed"
+		return m, nil, true
+	}
+	if err := coding.ValidatePlan(plan); err != nil {
+		m.addSystemNote("Plan edit validation error: " + err.Error())
+		m.status = "plan edit failed"
+		return m, nil, true
+	}
+	if err := m.store.SavePlan(plan); err != nil {
+		m.addSystemNote("Plan edit save error: " + err.Error())
+		m.status = "plan edit failed"
+		return m, nil, true
+	}
+	if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+		plan = saved
+	}
+	m.writeRunArtifact("plan", plan)
+	m.addSystemNote(renderPlan(plan))
+	m.status = "plan edited"
+	return m, nil, true
+}
+
+func (m model) attachFileCommand(raw string) (tea.Model, tea.Cmd, bool) {
+	taskSelector, path, lineRange, ok := splitAttachArgs(raw)
+	if !ok {
+		m.addSystemNote("Usage: /attach [task] <path> [start-end]")
+		m.status = "attach usage"
+		return m, nil, true
+	}
+	clean, err := cleanPreviewPath(path)
+	if err != nil {
+		m.addSystemNote("Attach error: " + err.Error())
+		m.status = "attach failed"
+		return m, nil, true
+	}
+	if info, err := os.Stat(filepath.Join(m.project.Root, clean)); err != nil {
+		m.addSystemNote("Attach error: " + err.Error())
+		m.status = "attach failed"
+		return m, nil, true
+	} else if info.IsDir() {
+		m.addSystemNote("Attach error: path is a directory")
+		m.status = "attach failed"
+		return m, nil, true
+	}
+	plan, found, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Attach error: " + err.Error())
+		m.status = "attach failed"
+		return m, nil, true
+	}
+	if !found {
+		m.addSystemNote("No plan. Use `/plan draft`, `/plan generate`, or `/plan import` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if plan.Status != coding.PlanStatusDraft {
+		m.addSystemNote("Only draft plans can be edited. Use `/plan` to inspect the current status.")
+		m.status = "attach blocked"
+		return m, nil, true
+	}
+	_, index, ok := selectTask(plan.Tasks, taskSelector)
+	if !ok {
+		m.addSystemNote(fmt.Sprintf("Task %q not found. Use `/tasks` to list task numbers and ids.", taskSelector))
+		m.status = "task not found"
+		return m, nil, true
+	}
+	spec := clean
+	if lineRange != "" {
+		spec += "#L" + lineRange
+	}
+	task := &plan.Tasks[index]
+	task.ContextFiles = appendUnique(task.ContextFiles, spec)
+	task.AllowedPaths = appendUnique(task.AllowedPaths, clean)
+	if err := coding.ValidatePlan(plan); err != nil {
+		m.addSystemNote("Attach validation error: " + err.Error())
+		m.status = "attach failed"
+		return m, nil, true
+	}
+	if err := m.store.SavePlan(plan); err != nil {
+		m.addSystemNote("Attach save error: " + err.Error())
+		m.status = "attach failed"
+		return m, nil, true
+	}
+	if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+		plan = saved
+	}
+	m.writeRunArtifact("plan", plan)
+	m.addSystemNote(fmt.Sprintf("Attached %s to task %s.", spec, plan.Tasks[index].Title))
+	m.status = "file attached"
+	return m, nil, true
+}
+
+func splitAttachArgs(raw string) (taskSelector, path, lineRange string, ok bool) {
+	fields := strings.Fields(strings.TrimSpace(raw))
+	if len(fields) == 0 {
+		return "", "", "", false
+	}
+	if len(fields) == 1 {
+		return "", fields[0], "", true
+	}
+	if looksTaskSelector(fields[0]) {
+		taskSelector = fields[0]
+		path = fields[1]
+		if len(fields) > 2 {
+			lineRange = normalizeLineRange(fields[2])
+		}
+		return taskSelector, path, lineRange, path != ""
+	}
+	path = fields[0]
+	lineRange = normalizeLineRange(fields[1])
+	return "", path, lineRange, path != ""
+}
+
+func looksTaskSelector(raw string) bool {
+	if _, err := strconv.Atoi(raw); err == nil {
+		return true
+	}
+	return strings.Contains(raw, "-")
+}
+
+func normalizeLineRange(raw string) string {
+	raw = strings.TrimSpace(strings.TrimPrefix(raw, "L"))
+	if raw == "" {
+		return ""
+	}
+	parts := strings.Split(raw, "-")
+	if len(parts) == 2 {
+		parts[0] = strings.TrimPrefix(strings.TrimSpace(parts[0]), "L")
+		parts[1] = strings.TrimPrefix(strings.TrimSpace(parts[1]), "L")
+		return parts[0] + "-L" + parts[1]
+	}
+	return raw
+}
+
+func splitPlanEditArgs(raw string) (taskSelector, field, value string, ok bool) {
+	parts := strings.Fields(strings.TrimSpace(raw))
+	if len(parts) < 3 {
+		return "", "", "", false
+	}
+	taskSelector = parts[0]
+	field = strings.ToLower(parts[1])
+	valueStart := strings.Index(raw, parts[1])
+	if valueStart < 0 {
+		return "", "", "", false
+	}
+	value = strings.TrimSpace(raw[valueStart+len(parts[1]):])
+	return taskSelector, field, value, value != ""
+}
+
+func applyPlanTaskEdit(task *coding.Task, field, value string) error {
+	switch strings.ReplaceAll(strings.ToLower(strings.TrimSpace(field)), "-", "_") {
+	case "title":
+		task.Title = strings.TrimSpace(value)
+	case "goal":
+		task.Goal = strings.TrimSpace(value)
+	case "allowed", "allowed_paths", "paths":
+		task.AllowedPaths = splitPlanEditList(value)
+	case "forbidden", "forbidden_paths":
+		task.ForbiddenPaths = splitPlanEditList(value)
+	case "context", "context_files":
+		task.ContextFiles = splitPlanEditList(value)
+	case "verify", "verification":
+		task.Verification = splitPlanEditList(value)
+	case "checks", "acceptance", "acceptance_checks":
+		items := splitPlanEditList(value)
+		checks := make([]coding.AcceptanceCheck, 0, len(items))
+		for _, item := range items {
+			checks = append(checks, coding.AcceptanceCheck{Description: item})
+		}
+		task.AcceptanceChecks = checks
+	default:
+		return fmt.Errorf("unknown field %q", field)
+	}
+	return nil
+}
+
+func appendUnique(items []string, item string) []string {
+	item = strings.TrimSpace(item)
+	if item == "" {
+		return items
+	}
+	for _, existing := range items {
+		if strings.TrimSpace(existing) == item {
+			return items
+		}
+	}
+	return append(items, item)
+}
+
+func splitPlanEditList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	sep := ","
+	if strings.Contains(value, ";;") {
+		sep = ";;"
+	}
+	parts := strings.Split(value, sep)
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
 	if strings.TrimSpace(request) == "" {
 		m.addSystemNote("Usage: /plan generate <request>")
 		m.status = "plan generate usage"
 		return m, nil, true
 	}
+	m.thinking = true
+	m.working.Spinner = spinner.Jump
+	m.status = "generating plan"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	raw, err := m.generatePlanJSON(ctx, request)
-	if err != nil {
-		m.addSystemNote("Plan generate error: " + err.Error())
-		m.status = "plan generate failed"
-		return m, nil, true
-	}
-	plan, err := m.planFromGeneratedJSON(raw)
-	if err != nil {
-		initialErr := err
-		repaired, repairErr := m.repairPlanJSON(ctx, request, raw, initialErr)
-		if repairErr != nil {
-			m.addSystemNote("Plan generate parse error: " + initialErr.Error() + "\n\nRepair error: " + repairErr.Error() + "\n\nRaw response:\n" + raw)
-			m.status = "plan generate failed"
-			return m, nil, true
-		}
-		plan, err = m.planFromGeneratedJSON(repaired)
+	m.modelRunID++
+	m.activeModelRunID = m.modelRunID
+	m.cancelModel = cancel
+	return m, tea.Batch(m.generatePlanCmd(ctx, m.activeModelRunID, request), m.working.Tick), true
+}
+
+func (m model) generatePlanCmd(ctx context.Context, runID int, request string) tea.Cmd {
+	return func() tea.Msg {
+		raw, err := m.generatePlanJSON(ctx, request)
 		if err != nil {
-			m.addSystemNote("Plan generate parse error: " + initialErr.Error() + "\n\nRepair parse error: " + err.Error() + "\n\nRaw response:\n" + raw + "\n\nRepaired response:\n" + repaired)
-			m.status = "plan generate failed"
-			return m, nil, true
+			return planGenerateMsg{runID: runID, request: request, err: err}
 		}
+		plan, err := m.planFromGeneratedJSON(raw)
+		if err != nil {
+			initialErr := err
+			repaired, repairErr := m.repairPlanJSON(ctx, request, raw, initialErr)
+			if repairErr != nil {
+				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("parse error: %v; repair error: %w", initialErr, repairErr)}
+			}
+			plan, err = m.planFromGeneratedJSON(repaired)
+			if err != nil {
+				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("parse error: %v; repair parse error: %w", initialErr, err)}
+			}
+		}
+		return planGenerateMsg{runID: runID, request: request, raw: raw, plan: plan}
 	}
-	if err := m.store.SavePlan(plan); err != nil {
-		m.err = err.Error()
-		m.status = "plan generate failed"
-		return m, nil, true
-	}
-	if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
-		plan = saved
-	}
-	m.addSystemNote(renderPlan(plan))
-	m.status = "plan generated"
-	return m, nil, true
 }
 
 func (m model) generatePlanJSON(ctx context.Context, request string) (string, error) {
@@ -1367,7 +2087,8 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
-				"Prefer verification commands discovered from the project context.",
+				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
+				"If no allowlisted verification applies, leave verification empty.",
 			}, "\n"),
 		},
 		{
@@ -1386,6 +2107,7 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
+				"Verification commands must be allowlisted; leave verification empty if unsure.",
 			}, "\n"),
 		},
 		{
@@ -1405,6 +2127,7 @@ func (m model) planFromGeneratedJSON(raw string) (coding.Plan, error) {
 		return coding.Plan{}, err
 	}
 	plan = coding.PrepareImportedPlan(plan, m.session.ID, m.project.Root, uuid.NewString)
+	normalizePlanVerification(&plan)
 	if err := coding.ValidatePlan(plan); err != nil {
 		return coding.Plan{}, err
 	}
@@ -1456,6 +2179,102 @@ func (m model) tasksCommandText() string {
 		fmt.Fprintf(&b, "%d. [%s] %s\n   %s\n", i+1, task.Status, task.Title, task.Goal)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) taskDetailCommandText(selector string) string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Task detail error: " + err.Error()
+	}
+	if !ok || len(plan.Tasks) == 0 {
+		return "No task detail yet. Use `/plan draft <title>` or `/plan generate <request>`."
+	}
+	task, index, ok := selectTask(plan.Tasks, selector)
+	if !ok {
+		return fmt.Sprintf("Task %q not found. Use `/tasks` to list task numbers and ids.", selector)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Task %d/%d: %s\n", index+1, len(plan.Tasks), task.Title)
+	fmt.Fprintf(&b, "id: %s\nstatus: %s\nplan: %s\n\nGoal:\n%s\n", task.ID, task.Status, plan.Title, task.Goal)
+	if len(task.AllowedPaths) > 0 {
+		fmt.Fprintf(&b, "\nAllowed paths:\n%s", bulletList(task.AllowedPaths))
+	}
+	if len(task.ForbiddenPaths) > 0 {
+		fmt.Fprintf(&b, "\nForbidden paths:\n%s", bulletList(task.ForbiddenPaths))
+	}
+	if len(task.ContextFiles) > 0 {
+		fmt.Fprintf(&b, "\nContext files:\n%s", bulletList(task.ContextFiles))
+	}
+	if len(task.Verification) > 0 {
+		fmt.Fprintf(&b, "\nVerification:\n%s", bulletList(task.Verification))
+	}
+	if len(task.AcceptanceChecks) > 0 {
+		b.WriteString("\nAcceptance checks:")
+		for _, check := range task.AcceptanceChecks {
+			label := strings.TrimSpace(check.Description)
+			if label == "" {
+				label = strings.TrimSpace(check.Command)
+			}
+			fmt.Fprintf(&b, "\n- %s", label)
+		}
+		b.WriteString("\n")
+	}
+	if packet, err := m.buildWorkerPacketForRun(task); err == nil {
+		fmt.Fprintf(&b, "\nWorker packet:\n%s\n", renderJSON(packet))
+	} else {
+		fmt.Fprintf(&b, "\nWorker packet error: %s\n", err)
+	}
+	events, err := m.store.TaskEvents(task.ID)
+	if err != nil {
+		fmt.Fprintf(&b, "\nEvents error: %s", err)
+		return strings.TrimRight(b.String(), "\n")
+	}
+	if len(events) == 0 {
+		b.WriteString("\nEvents:\nNo events yet.")
+		return strings.TrimRight(b.String(), "\n")
+	}
+	b.WriteString("\nEvents:")
+	for _, event := range events {
+		fmt.Fprintf(&b, "\n- %s %s: %s", event.CreatedAt.Format(time.RFC3339), event.Type, event.Message)
+		if len(event.Payload) > 0 {
+			fmt.Fprintf(&b, "\n  payload: %s", string(event.Payload))
+		}
+	}
+	if verdict, ok := latestReviewVerdict(events); ok {
+		fmt.Fprintf(&b, "\n\nLatest review: %s - %s", verdict.Verdict, verdict.Summary)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func selectTask(tasks []coding.Task, selector string) (coding.Task, int, bool) {
+	selector = strings.TrimSpace(selector)
+	if selector != "" {
+		if n, err := strconv.Atoi(selector); err == nil && n >= 1 && n <= len(tasks) {
+			return tasks[n-1], n - 1, true
+		}
+		for i, task := range tasks {
+			if task.ID == selector {
+				return task, i, true
+			}
+		}
+		return coding.Task{}, 0, false
+	}
+	for i, task := range tasks {
+		if task.Status == coding.TaskStatusRunning || task.Status == coding.TaskStatusReviewing || task.Status == coding.TaskStatusBlocked {
+			return task, i, true
+		}
+	}
+	return tasks[0], 0, true
+}
+
+func bulletList(items []string) string {
+	var b strings.Builder
+	for _, item := range items {
+		if strings.TrimSpace(item) != "" {
+			fmt.Fprintf(&b, "- %s\n", strings.TrimSpace(item))
+		}
+	}
+	return b.String()
 }
 
 func renderPlan(plan coding.Plan) string {

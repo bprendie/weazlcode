@@ -1,6 +1,6 @@
 # WeazlCode
 
-> Work in progress: WeazlCode currently starts from the WeazlChat codebase and is being reshaped into a first-class local-first AI coding IDE.
+> Work in progress: WeazlCode started from the WeazlChat codebase and is being reshaped into a first-class local-first AI coding IDE.
 
 <p align="center">
   <img src="weazlcode.png" alt="WeazlCode terminal IDE screenshot" width="960">
@@ -8,9 +8,24 @@
 
 <p align="center"><em>WeazlCode running as a terminal IDE with project status, context telemetry, slash commands, and an active coding session.</em></p>
 
-WeazlCode is a private, local-first AI coding TUI built from the WeazlChat foundation. The first cut keeps the straightforward vLLM/Ollama chat workflow intact while the project grows toward a coding platform where frontier models plan and review, and local models handle bounded implementation work.
+WeazlCode is a public, local-first AI coding TUI built from the WeazlChat foundation. The current build keeps the straightforward vLLM/Ollama chat workflow intact and adds a first working single-worker coding loop where frontier-capable models can plan/review while a local or smaller model handles bounded implementation work.
 
-The design target is simple: project-aware terminal sessions, local tools, clear permissions, resumable context, and enough Crush-inspired agent workflow to be useful without turning the app into a giant framework.
+The design target is simple: project-aware terminal sessions, local tools, clear permissions, resumable context, and enough Crush-inspired agent workflow to be useful without turning the app into a giant framework. Phase 1 through Phase 3 of the IDE plan are now implemented and smoke tested.
+
+## Current Status
+
+WeazlCode is still a work in progress, but it has moved beyond chat:
+
+- Project awareness: git root detection, `.weazlcode/` state, project summaries, `.weazlcodeignore`, and project-local tool logs.
+- Coding tools: git status/diff/log/show, file range reads, changed-file lists, path-validated patch application, and separate read-only vs verification command execution.
+- Model roles: `orchestrator`, `worker`, `reviewer`, and `summarizer` role mapping with local defaults and runtime-configured providers.
+- Structured plans: JSON plans/tasks, SQLite persistence, approval gates, task event history, and slash-command plan workflows.
+- Single-worker loop: bounded task packets, structured `WorkerPatch` output, unified diffs or full-file edits, path validation, verification, review, and capped repair loops.
+- IDE TUI: command palette, plan/task/diff/tools/config/output views, file picker/preview, file/range attachment, diagnostics/symbol/definition/reference views, status badges, and async model cancellation.
+- LSP foundation: language server detection, Go-first support with diagnostics, symbols, definitions, references, and diagnostics in task packets.
+- Project instructions and memory: `weazlcode init`, `WEAZLCODE.md`, discovered commands, and project memory distinct from chat memory.
+- Review and commit workflow: final review summaries, generated commit messages, optional confirmed commits, rollback guidance, and run artifact export.
+- Phase 3 hardening: allowlisted generated verification, discovered default verification, reviewer model execution, completion token telemetry, transient model endpoint retries, and deterministic Go/Python/no-build smoke coverage.
 
 ## Defaults
 
@@ -58,7 +73,7 @@ Markdown rendering is enabled by default with Charmbracelet Glamour, so model ou
 
 ## Build From Source
 
-WeazlCode is a Go app, but it uses SQLite through `go-sqlite3`, so builds need Go 1.25 or newer, CGO, and a working C compiler. That is the one little bit of yak hair.
+WeazlCode is a Go app, but it uses SQLite through `go-sqlite3`, so builds need Go 1.25 or newer, CGO, and a working C compiler.
 
 ### macOS
 
@@ -118,8 +133,8 @@ That writes `WEAZLCODE.md`, which is the primary WeazlCode instruction file. Exi
 ## Keys
 
 - `enter`: send message / select session
-- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/files`, `/preview`, `/lsp`, `/diagnostics`, `/symbols`, `/definition`, `/references`, `/instructions`, `/memory`, `/final-review`, `/commit-message`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
-- `/plan draft <title>` / `/plan import <json>` / `/plan generate <request>`: create or generate a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/run-worker`, `/worker-patch`, `/reviewer-input`, `/review`, `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` inspect or advance the latest plan
+- `/`: start a local command such as `/help`, `/commands`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/files`, `/preview`, `/attach`, `/lsp`, `/diagnostics`, `/symbols`, `/definition`, `/references`, `/instructions`, `/memory`, `/final-review`, `/commit-message`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, `/cancel`, or `/mouse`
+- `/plan draft <title>` / `/plan import <json>` / `/plan generate <request>`: create or generate a structured coding plan; `/plan`, `/tasks`, `/task`, `/packet`, `/approve`, `/reject`, `/plan edit`, `/run-task`, `/run-worker`, `/worker-patch`, `/review-diff`, `/reviewer-input`, `/run-reviewer`, `/review`, `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` inspect or advance the latest plan
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history
 - `pgup` / `pgdown`: scroll chat history
@@ -249,11 +264,14 @@ Tool calls are logged as JSONL under `.weazlcode/logs/tool_calls.jsonl` for proj
 WeazlCode now has the first full single-worker coding loop:
 
 1. Frontier-capable orchestrator context includes `WEAZLCODE.md` or fallback `AGENTS.md`, discovered project commands, project memory, and the current session.
-2. `/plan draft`, `/plan import`, or `/plan generate` creates a structured plan, and `/approve` gates worker execution.
-3. `/packet` and `/run-task` create bounded worker task packets with allowed paths, diagnostics, verification commands, approved tools, and a context policy that tells local workers to request missing context through `read_file`, `read_file_range`, or `search_files`.
-4. `/run-worker` asks the configured worker role for a `WorkerPatch` JSON response; `/worker-patch` can still manually import a patch or blocker. Patches are path-validated, applied, verified, and moved to review.
-5. `/reviewer-input` prepares the frontier review payload. `/review` accepts `approve`, `needs_fix`, or `blocked`, with capped repair loops.
-6. `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` cover the final review and commit artifact workflow.
+2. `/plan draft`, `/plan import`, or `/plan generate` creates a structured plan. Generated and imported verification commands are filtered through the same allowlist used for execution.
+3. `/task`, `/plan edit`, and `/attach` let you inspect and tighten the task before `/approve` gates worker execution.
+4. `/packet` and `/run-task` create bounded worker task packets with allowed paths, diagnostics, discovered verification commands, approved tools, and a context policy that tells local workers to request missing context through `read_file`, `read_file_range`, or `search_files`.
+5. `/run-worker` asks the configured worker role for a `WorkerPatch` JSON response; `/worker-patch` can still manually import a patch or blocker. Worker output can be a unified diff or structured full-file edits. WeazlCode path-validates, applies, verifies, writes run artifacts, and moves the task to review.
+6. `/review-diff`, `/reviewer-input`, and `/run-reviewer` prepare or dispatch the frontier review payload. `/review` accepts `approve`, `needs_fix`, or `blocked`, with capped repair loops.
+7. `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` cover the final review and commit artifact workflow.
+
+Model calls for generated plans, worker dispatch, and reviewer dispatch are asynchronous, cancellable with `/cancel`, and record telemetry such as provider, model, latency, raw response size, repair attempts, and token usage when the provider exposes it.
 
 Project-specific memory is separate from chat memory. Use `/memory key=value` to save a project note and `/memory` or `/instructions` to inspect what will be loaded for future orchestrator context.
 

@@ -42,6 +42,49 @@ func TestPreviewCommandRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestAttachCommandAddsContextRangeAndAllowedPath(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, root, "README.md", "one\ntwo\nthree\n")
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.session.ProjectRoot = root
+	updated, _, handled := m.handleSlashCommand("/plan draft Attach README")
+	if !handled {
+		t.Fatal("plan draft handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/attach README.md 2-3")
+	if !handled {
+		t.Fatal("attach handled = false")
+	}
+	got := updated.(model)
+	if got.status != "file attached" {
+		t.Fatalf("status = %q, want file attached", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	task := plan.Tasks[0]
+	if len(task.ContextFiles) != 1 || task.ContextFiles[0] != "README.md#L2-L3" {
+		t.Fatalf("context files = %#v", task.ContextFiles)
+	}
+	if len(task.AllowedPaths) != 1 || task.AllowedPaths[0] != "README.md" {
+		t.Fatalf("allowed paths = %#v", task.AllowedPaths)
+	}
+	packet, err := got.buildWorkerPacket(task)
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	if len(packet.ContextFiles) != 1 || packet.ContextFiles[0].Content != "two\nthree" {
+		t.Fatalf("packet context = %#v", packet.ContextFiles)
+	}
+}
+
 func writeTestFile(t *testing.T, root, rel, body string) {
 	t.Helper()
 	path := filepath.Join(root, rel)

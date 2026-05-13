@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -32,6 +33,21 @@ func TestSlashHelpCommand(t *testing.T) {
 	}
 	if !strings.Contains(got.viewport.View(), "/files [query] - fuzzy-find project files") {
 		t.Fatalf("viewport missing help: %q", got.viewport.View())
+	}
+}
+
+func TestSlashCommandsShowsPalette(t *testing.T) {
+	m := commandTestModel()
+	updated, _, handled := m.handleSlashCommand("/commands")
+	if !handled {
+		t.Fatal("handled = false, want true")
+	}
+	got := updated.(model)
+	view := got.viewport.View()
+	for _, want := range []string{"Command palette:", "Plan:", "/plan edit", "Worker:", "/run-worker", "Review:", "/review-diff"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("palette missing %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -149,6 +165,66 @@ func TestGeneratedPlanParsing(t *testing.T) {
 	}
 }
 
+func TestGeneratedPlanFiltersNonAllowlistedVerification(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Generated","summary":"From model","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"verification":["grep -q ok README.md","go test ./..."],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	plan, err := m.planFromGeneratedJSON(raw)
+	if err != nil {
+		t.Fatalf("planFromGeneratedJSON: %v", err)
+	}
+	if !reflect.DeepEqual(plan.Tasks[0].Verification, []string{"go test ./..."}) {
+		t.Fatalf("verification = %#v", plan.Tasks[0].Verification)
+	}
+}
+
+func TestPhase3GeneratedPlanVerificationSmoke(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  []string
+	}{
+		{
+			name:  "go",
+			files: map[string]string{"go.mod": "module example.test\n"},
+			want:  []string{"go build ./...", "go test ./..."},
+		},
+		{
+			name:  "python",
+			files: map[string]string{"pyproject.toml": "[project]\nname = \"example\"\n"},
+			want:  []string{"python -m pytest"},
+		},
+		{
+			name:  "no-build",
+			files: map[string]string{"README.md": "# Example\n"},
+			want:  []string{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for name, content := range tt.files {
+				if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+					t.Fatalf("WriteFile %s: %v", name, err)
+				}
+			}
+			m := commandTestModel(t)
+			m.project.Root = root
+			if got := m.defaultVerificationCommands(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("defaultVerificationCommands = %#v, want %#v", got, tt.want)
+			}
+
+			raw := `{"title":"Generated","summary":"From model","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"verification":["grep -q ok README.md"],"acceptance_checks":[{"description":"checks pass"}]}]}`
+			plan, err := m.planFromGeneratedJSON(raw)
+			if err != nil {
+				t.Fatalf("planFromGeneratedJSON: %v", err)
+			}
+			if len(plan.Tasks[0].Verification) != 0 {
+				t.Fatalf("verification = %#v, want filtered empty", plan.Tasks[0].Verification)
+			}
+		})
+	}
+}
+
 func TestGeneratedPlanRepairPrompt(t *testing.T) {
 	m := commandTestModel(t)
 	raw := `{"title":123,"tasks":[{"name":"bad"}]}`
@@ -242,9 +318,48 @@ func TestSlashTasksCommandShowsProgress(t *testing.T) {
 	}
 }
 
+func TestSlashTaskCommandShowsDetailPacketAndEvents(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	raw := `{"title":"Detail Plan","summary":"Track work","tasks":[{"title":"Update README","goal":"Change the README","allowed_paths":["README.md"],"context_files":["README.md"],"verification":["go test ./..."],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/task 1")
+	if !handled {
+		t.Fatal("task handled = false")
+	}
+	got := updated.(model)
+	view := got.taskDetailCommandText("1")
+	for _, want := range []string{"Task 1/1: Update README", "Allowed paths:", "Worker packet:", `"context_files"`, "Events:", "worker_start"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("task detail missing %q:\n%s", want, view)
+		}
+	}
+}
+
 func TestSlashPlanImportCommand(t *testing.T) {
 	m := commandTestModel(t)
-	raw := `{"title":"Imported","summary":"From orchestrator","tasks":[{"title":"Task","goal":"Do imported work","allowed_paths":["internal/coding"],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	raw := `{"title":"Imported","summary":"From orchestrator","tasks":[{"title":"Task","goal":"Do imported work","allowed_paths":["internal/coding"],"verification":["grep -q no README.md"],"acceptance_checks":[{"description":"checks pass"}]}]}`
 	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
 		t.Fatal("handled = false, want true")
@@ -259,6 +374,82 @@ func TestSlashPlanImportCommand(t *testing.T) {
 	}
 	if !ok || plan.Title != "Imported" || len(plan.Tasks) != 1 || plan.Tasks[0].PlanID != plan.ID {
 		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	if len(plan.Tasks[0].Verification) != 0 {
+		t.Fatalf("verification = %#v, want filtered empty", plan.Tasks[0].Verification)
+	}
+}
+
+func TestSlashPlanEditCommandUpdatesDraftTask(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Editable","summary":"From orchestrator","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	commands := []string{
+		"/plan edit 1 title Update README",
+		"/plan edit 1 goal Replace old wording with Phase 2 wording",
+		"/plan edit 1 allowed_paths README.md, docs/README.md",
+		"/plan edit 1 context_files README.md",
+		"/plan edit 1 verification go test ./...",
+		"/plan edit 1 checks README updated;;tests pass",
+	}
+	for _, command := range commands {
+		updated, _, handled = m.handleSlashCommand(command)
+		if !handled {
+			t.Fatalf("%s handled = false", command)
+		}
+		m = updated.(model)
+		if m.status != "plan edited" {
+			t.Fatalf("%s status = %q, want plan edited", command, m.status)
+		}
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	task := plan.Tasks[0]
+	if task.Title != "Update README" || task.Goal != "Replace old wording with Phase 2 wording" {
+		t.Fatalf("task text = %#v", task)
+	}
+	if !reflect.DeepEqual(task.AllowedPaths, []string{"README.md", "docs/README.md"}) {
+		t.Fatalf("allowed = %#v", task.AllowedPaths)
+	}
+	if !reflect.DeepEqual(task.ContextFiles, []string{"README.md"}) {
+		t.Fatalf("context = %#v", task.ContextFiles)
+	}
+	if !reflect.DeepEqual(task.Verification, []string{"go test ./..."}) {
+		t.Fatalf("verification = %#v", task.Verification)
+	}
+	if len(task.AcceptanceChecks) != 2 || task.AcceptanceChecks[0].Description != "README updated" || task.AcceptanceChecks[1].Description != "tests pass" {
+		t.Fatalf("checks = %#v", task.AcceptanceChecks)
+	}
+}
+
+func TestSlashPlanEditCommandRequiresDraftPlan(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Locked")
+	if !handled {
+		t.Fatal("plan draft handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/plan edit 1 title Should not edit")
+	if !handled {
+		t.Fatal("plan edit handled = false")
+	}
+	got := updated.(model)
+	if got.status != "plan edit blocked" {
+		t.Fatalf("status = %q, want plan edit blocked", got.status)
 	}
 }
 
@@ -387,7 +578,7 @@ func TestWorkerPatchMessages(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "unified diff", `"task_id": "task-1"`, "README.md"} {
+	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "files", "unified diff", `"task_id": "task-1"`, "README.md"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("worker messages missing %q:\n%s", want, combined)
 		}
@@ -409,6 +600,21 @@ func TestWorkerPatchRepairMessages(t *testing.T) {
 	}
 }
 
+func TestWorkerPatchDiffRepairMessages(t *testing.T) {
+	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, ToolsAllowed: []string{"apply_patch"}}
+	patch := coding.WorkerPatch{TaskID: "task-1", Summary: "Updated README", Patch: "not a diff"}
+	messages := workerPatchDiffRepairMessages(packet, patch, errors.New("invalid hunk"))
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"repair invalid unified diffs", "Return only valid JSON", "Keep the same task_id", "files", "invalid hunk", "not a diff"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("diff repair messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
 func TestRunWorkerRequiresRunningTask(t *testing.T) {
 	m := commandTestModel(t)
 	updated, _, handled := m.handleSlashCommand("/run-worker")
@@ -418,6 +624,66 @@ func TestRunWorkerRequiresRunningTask(t *testing.T) {
 	got := updated.(model)
 	if got.status != "no plan" {
 		t.Fatalf("status = %q, want no plan", got.status)
+	}
+}
+
+func TestRunWorkerStartsAsync(t *testing.T) {
+	m := commandTestModel(t)
+	updated, _, handled := m.handleSlashCommand("/plan draft Async worker")
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	updated, cmd, handled := m.handleSlashCommand("/run-worker")
+	if !handled {
+		t.Fatal("run-worker handled = false")
+	}
+	got := updated.(model)
+	if cmd == nil {
+		t.Fatal("cmd = nil, want async worker command")
+	}
+	if !got.thinking || got.status != "running worker" {
+		t.Fatalf("thinking/status = %t/%q, want true/running worker", got.thinking, got.status)
+	}
+}
+
+func TestCancelModelCommandCancelsActiveRun(t *testing.T) {
+	m := commandTestModel(t)
+	cancelled := false
+	m.thinking = true
+	m.activeModelRunID = 7
+	m.cancelModel = func() { cancelled = true }
+	updated, _, handled := m.handleSlashCommand("/cancel")
+	if !handled {
+		t.Fatal("cancel handled = false")
+	}
+	got := updated.(model)
+	if !cancelled {
+		t.Fatal("cancel func was not called")
+	}
+	if got.thinking || got.activeModelRunID != 0 || got.cancelModel != nil || got.status != "model cancelled" {
+		t.Fatalf("model state = thinking:%t run:%d cancel:%v status:%q", got.thinking, got.activeModelRunID, got.cancelModel, got.status)
+	}
+}
+
+func TestStaleModelMessagesAreIgnored(t *testing.T) {
+	m := commandTestModel(t)
+	m.activeModelRunID = 2
+	m.thinking = true
+	updated, _ := m.Update(workerRunMsg{runID: 1, err: errors.New("late")})
+	got := updated.(model)
+	if !got.thinking || got.status != "" || got.activeModelRunID != 2 {
+		t.Fatalf("stale message changed model: thinking=%t status=%q run=%d", got.thinking, got.status, got.activeModelRunID)
 	}
 }
 
@@ -499,6 +765,121 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	if len(events) != 4 || events[2].Type != "worker_patch" || events[3].Type != "verification" || len(events[3].Payload) == 0 {
 		t.Fatalf("events = %#v", events)
 	}
+	kinds := runArtifactKinds(t, filepath.Join(root, ".weazlcode", "runs", got.session.ID))
+	for _, want := range []string{"plan", "worker_packet", "worker_output", "diff", "verification"} {
+		if !kinds[want] {
+			t.Fatalf("artifact %q missing from %#v", want, kinds)
+		}
+	}
+}
+
+func TestSlashWorkerPatchAppliesFileEditsAndMarksReviewing(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker edit","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Updated README", Files: []coding.WorkerFileEdit{{Path: "README.md", Content: "new\n"}}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing", got.status)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new\n" {
+		t.Fatalf("README = %q, want new", data)
+	}
+}
+
+func TestWorkerPatchTelemetryAddsTaskEvent(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker edit","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	patch := coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Updated README", Files: []coding.WorkerFileEdit{{Path: "README.md", Content: "new\n"}}}
+	updated, _, _ = m.applyWorkerPatchWithTelemetry(patch, true, &modelTelemetry{Role: "worker", Provider: "local-vllm", Model: "test-model", LatencyMS: 123, RawChars: 456, JSONRepairAttempts: 1})
+	got := updated.(model)
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	modelEvent := coding.TaskEvent{}
+	for _, event := range events {
+		if event.Type == "worker_model" {
+			modelEvent = event
+			break
+		}
+	}
+	if modelEvent.Type == "" {
+		t.Fatalf("events = %#v", events)
+	}
+	if !strings.Contains(string(modelEvent.Payload), `"latency_ms":123`) || !strings.Contains(string(modelEvent.Payload), `"json_repair_attempts":1`) {
+		t.Fatalf("telemetry payload = %s", modelEvent.Payload)
+	}
 }
 
 func TestSlashReviewerInputCommand(t *testing.T) {
@@ -521,6 +902,82 @@ func TestSlashReviewerInputCommand(t *testing.T) {
 	}
 	if !strings.Contains(input.Diff, "-old") || !strings.Contains(input.Diff, "+new") || !strings.Contains(input.VerificationOut, "python -m compileall .") {
 		t.Fatalf("reviewer input = %#v", input)
+	}
+}
+
+func TestReviewerVerdictMessages(t *testing.T) {
+	input := coding.ReviewerInput{
+		TaskPacket: coding.TaskPacket{TaskID: "task-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}},
+		Diff:       "diff --git a/README.md b/README.md",
+	}
+	messages := reviewerVerdictMessages(input)
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"frontier reviewer", "Return only valid JSON", "approve|needs_fix|blocked", "task-1", "README.md"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("reviewer messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
+func TestRunReviewerStartsAsync(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, cmd, handled := m.handleSlashCommand("/run-reviewer")
+	if !handled {
+		t.Fatal("run-reviewer handled = false")
+	}
+	got := updated.(model)
+	if cmd == nil {
+		t.Fatal("cmd = nil, want async reviewer command")
+	}
+	if !got.thinking || got.status != "running reviewer" || got.activeModelRunID == 0 || got.cancelModel == nil {
+		t.Fatalf("state = thinking:%t status:%q run:%d cancel:%v", got.thinking, got.status, got.activeModelRunID, got.cancelModel)
+	}
+}
+
+func TestReviewerTelemetryAddsTaskEvent(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, _, _ := m.applyReviewVerdict(coding.ReviewVerdict{Verdict: coding.ReviewApprove, Summary: "ok"}, &modelTelemetry{Role: "reviewer", Provider: "frontier", Model: "review-model", LatencyMS: 77, RawChars: 100})
+	got := updated.(model)
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == "reviewer_model" && strings.Contains(string(event.Payload), `"latency_ms":77`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("reviewer telemetry missing from %#v", events)
+	}
+}
+
+func TestSlashReviewDiffCommandShowsChangedFilesAndCommands(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, _, handled := m.handleSlashCommand("/review-diff")
+	if !handled {
+		t.Fatal("review-diff handled = false")
+	}
+	got := updated.(model)
+	if got.status != "view review-diff" {
+		t.Fatalf("status = %q, want view review-diff", got.status)
+	}
+	view := got.reviewDiffCommandText()
+	for _, want := range []string{"Review diff: Update README", "Changed files:", "README.md", "/review approve", "/review needs-fix", "Diff:"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("review diff missing %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -581,8 +1038,7 @@ func TestFinalReviewCommitMessageAndExport(t *testing.T) {
 
 func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	m, _ := commandTestModelWithReviewingTask(t)
-	raw := `{"verdict":"approve","summary":"Looks good"}`
-	updated, _, handled := m.handleSlashCommand("/review " + raw)
+	updated, _, handled := m.handleSlashCommand("/review approve Looks good")
 	if !handled {
 		t.Fatal("review handled = false")
 	}
@@ -597,11 +1053,41 @@ func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	if !ok || plan.Status != "done" || plan.Tasks[0].Status != "done" {
 		t.Fatalf("plan = %#v ok=%v", plan, ok)
 	}
+	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
+	if !kinds["review"] {
+		t.Fatalf("review artifact missing from %#v", kinds)
+	}
 	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
 	if len(events) != 5 || events[4].Type != "reviewer_verdict" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestReviewNeedsFixShorthandRequestsRepair(t *testing.T) {
+	m, _ := commandTestModelWithReviewingTask(t)
+	updated, _, handled := m.handleSlashCommand(`/review needs-fix missing docs;;tests not run`)
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	if got.status != "repair requested" {
+		t.Fatalf("status = %q, want repair requested", got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != "blocked" {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "repair_requested" || !strings.Contains(string(events[len(events)-1].Payload), "tests not run") {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -655,6 +1141,12 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	}
 	if !strings.Contains(string(events[6].Payload), "Repair focus") || !strings.Contains(string(events[6].Payload), "Use the requested wording only") {
 		t.Fatalf("repair payload = %s", events[6].Payload)
+	}
+	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
+	for _, want := range []string{"repair_request", "repair_packet"} {
+		if !kinds[want] {
+			t.Fatalf("artifact %q missing from %#v", want, kinds)
+		}
 	}
 }
 
@@ -758,12 +1250,36 @@ func runTestGit(t *testing.T, cwd string, args ...string) {
 	}
 }
 
+func runArtifactKinds(t *testing.T, dir string) map[string]bool {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	kinds := map[string]bool{}
+	for _, path := range matches {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("ReadFile: %v", err)
+		}
+		var artifact struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(data, &artifact); err != nil {
+			t.Fatalf("Unmarshal %s: %v", path, err)
+		}
+		kinds[artifact.Kind] = true
+	}
+	return kinds
+}
+
 func commandTestModel(t ...*testing.T) model {
 	cfg := config.Default()
 	registry := tools.NewRegistry()
 	registry.Register(tools.NewCalculatorTool())
 	registry.Register(tools.NewRunVerificationCommandTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
 	registry.Register(tools.NewGitDiffTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
+	registry.Register(tools.NewListChangedFilesTool(tools.Limits{WorkspaceRoots: []string{"/tmp"}}))
 	ti := textinput.New()
 	ti.Focus()
 	var store *storage.Store
