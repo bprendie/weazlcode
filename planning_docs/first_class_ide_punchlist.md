@@ -179,6 +179,23 @@ Goal: make generated plans and model runs reliable enough for repeated real-repo
 - [x] Add retry/backoff policy for transient model endpoint failures.
 - [x] Add Phase 3 smoke for generated plan verification on Go, Python, and no-build repos.
 
+## Phase 4: Model Reliability And Task Quality
+
+Goal: make the single-worker loop harder to misuse by tightening setup validation, task quality, worker guardrails, and reviewer checks before adding broader extension systems.
+
+- [ ] Run setup UX smoke for OpenAI, Claude, custom OpenAI-compatible, and none/local fallback paths.
+- [ ] Verify README setup instructions against the actual setup prompts.
+- [ ] Add stricter planner prompt rules for bounded paths, concrete edit goals, and acceptance checks.
+- [ ] Add task quality validation before approval for vague goals, missing paths, missing acceptance checks, and broad file scopes.
+- [ ] Add `/plan validate` or automatic validation output in the plan/task workflow.
+- [ ] Require worker output to touch only explicit task target paths and surface clearer errors when it does not.
+- [ ] Detect suspicious full-file rewrites for small requested changes.
+- [ ] Make reviewer checks compare task goal, allowed paths, diff, verification output, and acceptance checks more mechanically.
+- [ ] Block or flag approvals when a diff is plausible but unrelated to the task.
+- [ ] Store clearer reviewer rationale in task events and run artifacts.
+- [ ] Run a live smoke matrix for local worker plus planning LLM, same endpoint for all roles, and none/local fallback.
+- [ ] Document Phase 4 smoke results and remaining reliability gaps.
+
 ## Later Extensions
 
 - [ ] MCP client support.
@@ -191,6 +208,6 @@ Goal: make generated plans and model runs reliable enough for repeated real-repo
 
 ## Immediate Next Build Order
 
-1. Capture the full Go transport error from live TUI model calls outside the alternate-screen UI.
-2. Decide whether the model client needs transport tuning before the next live smoke.
-3. Decide the next phase boundary: live model reliability polish or first pass at MCP/skills hooks.
+1. Run setup UX smoke for OpenAI, Claude, custom OpenAI-compatible, and none/local fallback paths.
+2. Add task quality validation before approval.
+3. Tighten worker/reviewer guardrails around unrelated or overly broad diffs.
