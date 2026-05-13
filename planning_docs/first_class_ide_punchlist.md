@@ -137,7 +137,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Run deterministic Stage 1 single-worker loop smoke.
 - [x] Record local model endpoint availability for Stage 1.
 - [ ] Exercise the single-worker loop against local Ollama/vLLM models.
-- [ ] Use frontier planner/reviewer roles on an API-compatible endpoint.
+- [x] Use frontier planner/reviewer roles on an API-compatible endpoint.
 - [ ] Expand LSP support beyond the current Go-first foundation.
 
 ## Later Extensions
@@ -152,7 +152,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Exercise the single-worker loop against local Ollama/vLLM models.
-2. Use frontier planner/reviewer roles on an API-compatible endpoint.
+1. Add `/plan generate <request>` backed by orchestrator role calls and strict parser validation.
+2. Exercise the single-worker loop against local Ollama/vLLM models.
 3. Expand LSP support beyond the current Go-first foundation.
 4. Keep parallel workers in Later Extensions until single-worker reliability is proven.
