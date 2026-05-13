@@ -134,6 +134,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Harden `weazlcode init` templates through real project use.
 - [x] Add checked-in `WEAZLCODE.md` instructions for this repo.
 - [x] Add `weazlcode init --force` for controlled regeneration.
+- [x] Run deterministic Stage 1 single-worker loop smoke.
+- [x] Record local model endpoint availability for Stage 1.
 - [ ] Exercise the single-worker loop against local Ollama/vLLM models.
 - [ ] Use frontier planner/reviewer roles on an API-compatible endpoint.
 - [ ] Expand LSP support beyond the current Go-first foundation.
