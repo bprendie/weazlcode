@@ -2,6 +2,10 @@
 
 The serious one, allegedly. Still a work in progress.
 
+<p align="center">
+  <img src="weazlcode.png" alt="WeazlCode terminal IDE screenshot" width="960">
+</p>
+
 WeazlCode is a sovereign, local-first AI coding TUI that splits the brain to save the codebase. Big models review the plan; local models do the grindage. Stop letting expensive APIs vomit thousands of lines of messy code into your editor. WeazlCode delivers project-aware terminal sessions, explicit local tools, resumable context, and tightly bounded tasks without turning your workflow into a bloated, black-box agent carnival.
 
 ## Current Status: The Split-Brain Loop
