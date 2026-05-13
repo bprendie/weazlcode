@@ -91,12 +91,13 @@ func main() {
 func handleCLI(args []string) (bool, int) {
 	switch strings.ToLower(args[0]) {
 	case "init":
+		force := len(args) > 1 && (args[1] == "--force" || args[1] == "-f")
 		summary, err := project.Detect("")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "project: %v\n", err)
 			return true, 1
 		}
-		path, err := project.InitInstructions(summary.Root, summary)
+		path, err := project.InitInstructionsWithOptions(summary.Root, summary, force)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "init: %v\n", err)
 			return true, 1
@@ -109,6 +110,7 @@ func handleCLI(args []string) (bool, int) {
 		fmt.Println("Usage:")
 		fmt.Println("  weazlcode          start the TUI")
 		fmt.Println("  weazlcode init     create WEAZLCODE.md project instructions")
+		fmt.Println("  weazlcode init --force")
 		return true, 0
 	default:
 		return false, 0

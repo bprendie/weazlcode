@@ -109,7 +109,7 @@ Initialize project instructions from the repo root:
 weazlcode init
 ```
 
-That writes `WEAZLCODE.md`, which is the primary WeazlCode instruction file. Existing `AGENTS.md` files are also read as a fallback.
+That writes `WEAZLCODE.md`, which is the primary WeazlCode instruction file. Existing `AGENTS.md` files are also read as a fallback. Use `weazlcode init --force` to regenerate the file after project conventions change.
 
 ## Keys
 

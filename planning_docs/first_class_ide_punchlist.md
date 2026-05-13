@@ -129,6 +129,15 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add rollback guidance using patch reverse or git checkout instructions.
 - [x] Add session artifact export under `.weazlcode/runs/`.
 
+## Milestone 10: Phase Hardening
+
+- [x] Harden `weazlcode init` templates through real project use.
+- [x] Add checked-in `WEAZLCODE.md` instructions for this repo.
+- [x] Add `weazlcode init --force` for controlled regeneration.
+- [ ] Exercise the single-worker loop against local Ollama/vLLM models.
+- [ ] Use frontier planner/reviewer roles on an API-compatible endpoint.
+- [ ] Expand LSP support beyond the current Go-first foundation.
+
 ## Later Extensions
 
 - [ ] MCP client support.
@@ -141,8 +150,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Harden `weazlcode init` templates through real project use.
-2. Exercise the single-worker loop against local Ollama/vLLM models.
-3. Use frontier planner/reviewer roles on an API-compatible endpoint.
-4. Expand LSP support beyond the current Go-first foundation.
-5. Keep parallel workers in Later Extensions until single-worker reliability is proven.
+1. Exercise the single-worker loop against local Ollama/vLLM models.
+2. Use frontier planner/reviewer roles on an API-compatible endpoint.
+3. Expand LSP support beyond the current Go-first foundation.
+4. Keep parallel workers in Later Extensions until single-worker reliability is proven.
