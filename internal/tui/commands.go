@@ -705,6 +705,7 @@ func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
 	m.thinking = true
 	m.working.Spinner = spinner.Jump
 	m.status = "running worker"
+	m.streamAt = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	m.modelRunID++
 	m.activeModelRunID = m.modelRunID
@@ -1226,6 +1227,7 @@ func (m model) runReviewerModel() (tea.Model, tea.Cmd, bool) {
 	m.thinking = true
 	m.working.Spinner = spinner.Jump
 	m.status = "running reviewer"
+	m.streamAt = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	m.modelRunID++
 	m.activeModelRunID = m.modelRunID
@@ -2211,6 +2213,7 @@ func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
 	m.thinking = true
 	m.working.Spinner = spinner.Jump
 	m.status = "generating plan"
+	m.streamAt = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	m.modelRunID++
 	m.activeModelRunID = m.modelRunID

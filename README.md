@@ -27,6 +27,7 @@ WeazlCode is still a work in progress, but it has moved beyond chat:
 - Review and commit workflow: final review summaries, generated commit messages, optional confirmed commits, rollback guidance, and run artifact export.
 - Phase 3 hardening: allowlisted generated verification, discovered default verification, reviewer model execution, completion token telemetry, transient model endpoint retries, and deterministic Go/Python/no-build smoke coverage.
 - Phase 4 reliability: setup UX smoke coverage, stricter task validation, bounded-path worker guardrails, reviewer scope checks, persisted reviewer rationale, and live model matrix smoke coverage.
+- Phase 4 follow-up: async plan/worker/reviewer spinner updates preserve the active IDE view while long-running model calls finish.
 
 ## Defaults
 

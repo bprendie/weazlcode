@@ -474,7 +474,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.thinking || m.mode == modeLoading {
 			var cmd tea.Cmd
 			m.working, cmd = m.working.Update(msg)
-			if m.thinking {
+			if m.thinking && m.stream != nil {
 				m.renderMessages()
 			}
 			return m, cmd

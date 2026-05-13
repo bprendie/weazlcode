@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 
@@ -726,6 +727,20 @@ func TestStaleModelMessagesAreIgnored(t *testing.T) {
 	got := updated.(model)
 	if !got.thinking || got.status != "" || got.activeModelRunID != 2 {
 		t.Fatalf("stale message changed model: thinking=%t status=%q run=%d", got.thinking, got.status, got.activeModelRunID)
+	}
+}
+
+func TestAsyncModelSpinnerPreservesIDEView(t *testing.T) {
+	m := commandTestModel(t)
+	m.working = spinner.New()
+	m.setIDEView("plan", "important plan view")
+	m.thinking = true
+	m.status = "running worker"
+
+	updated, _ := m.Update(spinner.TickMsg{})
+	got := updated.(model)
+	if !strings.Contains(got.viewport.View(), "important plan view") {
+		t.Fatalf("viewport changed during async spinner tick:\n%s", got.viewport.View())
 	}
 }
 
