@@ -10,7 +10,7 @@
 
 WeazlCode is a public, local-first AI coding TUI built from the WeazlChat foundation. The current build keeps the straightforward vLLM/Ollama chat workflow intact and adds a first working single-worker coding loop where frontier-capable models can plan/review while a local or smaller model handles bounded implementation work.
 
-The design target is simple: project-aware terminal sessions, local tools, clear permissions, resumable context, and enough Crush-inspired agent workflow to be useful without turning the app into a giant framework. Phase 1 through Phase 3 of the IDE plan are now implemented and smoke tested.
+The design target is simple: project-aware terminal sessions, local tools, clear permissions, resumable context, and enough Crush-inspired agent workflow to be useful without turning the app into a giant framework. Phase 1 through Phase 4 of the IDE plan are now implemented and smoke tested.
 
 ## Current Status
 
@@ -26,6 +26,7 @@ WeazlCode is still a work in progress, but it has moved beyond chat:
 - Project instructions and memory: `weazlcode init`, `WEAZLCODE.md`, discovered commands, and project memory distinct from chat memory.
 - Review and commit workflow: final review summaries, generated commit messages, optional confirmed commits, rollback guidance, and run artifact export.
 - Phase 3 hardening: allowlisted generated verification, discovered default verification, reviewer model execution, completion token telemetry, transient model endpoint retries, and deterministic Go/Python/no-build smoke coverage.
+- Phase 4 reliability: setup UX smoke coverage, stricter task validation, bounded-path worker guardrails, reviewer scope checks, persisted reviewer rationale, and live model matrix smoke coverage.
 
 ## Defaults
 

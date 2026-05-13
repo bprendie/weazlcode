@@ -208,6 +208,6 @@ Goal: make the single-worker loop harder to misuse by tightening setup validatio
 
 ## Immediate Next Build Order
 
-1. Run setup UX smoke for OpenAI, Claude, custom OpenAI-compatible, and none/local fallback paths.
-2. Add task quality validation before approval.
-3. Tighten worker/reviewer guardrails around unrelated or overly broad diffs.
+1. Regroup on Phase 5 scope now that Phase 4 is implemented and smoke tested.
+2. Decide whether Phase 5 starts with MCP/skills/hooks or with async TUI polish from the Phase 4 smoke notes.
+3. Keep parallel workers deferred until the single-worker loop has more real-repo mileage.
