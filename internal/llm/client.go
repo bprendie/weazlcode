@@ -90,6 +90,8 @@ func (c Client) CompleteWithUsage(ctx context.Context, messages []ChatMessage, m
 	switch strings.ToLower(c.provider.Type) {
 	case "vllm":
 		return c.completeOpenAICompat(ctx, messages, maxTokens)
+	case "anthropic":
+		return c.completeAnthropic(ctx, messages, maxTokens)
 	case "ollama":
 		return c.completeOllama(ctx, messages, maxTokens)
 	default:

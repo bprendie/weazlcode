@@ -29,7 +29,7 @@ func run() error {
 	}
 
 	fmt.Println("WeazlCode provider setup")
-	fmt.Println("Configure the local worker first. Orchestrator/reviewer can point at API-compatible frontier endpoints afterward.")
+	fmt.Println("Configure the local worker first. Then choose an optional LLM provider for planning and review.")
 	providerType := askChoice(reader, "Local worker provider", []string{"ollama", "vllm"}, "ollama")
 	defaultURL := "http://localhost:8000"
 	if providerType == "ollama" {
@@ -44,18 +44,18 @@ func run() error {
 		fmt.Printf("Could not query models: %v\n", err)
 		model := askString(reader, "Model name", defaultModel(providerType))
 		contextWindow := askContextWindow(reader)
-		return writeConfig(cfgPath, configureFrontierRoles(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+		return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
 	}
 	if len(models) == 0 {
 		fmt.Println("Provider returned no models.")
 		model := askString(reader, "Model name", defaultModel(providerType))
 		contextWindow := askContextWindow(reader)
-		return writeConfig(cfgPath, configureFrontierRoles(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+		return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
 	}
 
 	model := askModel(reader, models)
 	contextWindow := askContextWindow(reader)
-	return writeConfig(cfgPath, configureFrontierRoles(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
+	return writeConfig(cfgPath, configureLLMProvider(reader, configureTools(reader, cfg)), providerType, serverURL, model, contextWindow)
 }
 
 func fetchModels(providerType, serverURL string) ([]string, error) {
@@ -162,39 +162,59 @@ func writeConfig(cfgPath string, cfg config.Config, providerType, serverURL, mod
 	return nil
 }
 
-func configureFrontierRoles(reader *bufio.Reader, cfg config.Config) config.Config {
+func configureLLMProvider(reader *bufio.Reader, cfg config.Config) config.Config {
 	fmt.Println("")
-	fmt.Println("Optional frontier model endpoints")
-	fmt.Println("Use a vLLM/OpenAI-compatible base URL. Leave blank to keep the local worker for planning/review.")
-	orchestratorURL := askString(reader, "Orchestrator base URL", "")
-	if orchestratorURL == "" {
+	fmt.Println("Optional LLM provider for planning and review")
+	fmt.Println("OpenAI or Claude are good starting points. Choose none to use the configured local model provider.")
+	provider := askChoice(reader, "Planning/review LLM provider", []string{"openai", "claude", "custom", "none"}, "openai")
+	if provider == "none" {
+		fmt.Println("Warning: planning and review will use the local model provider. Planning mode may not be as robust as OpenAI or Claude.")
+		cfg.ModelRoles.Orchestrator = ""
+		cfg.ModelRoles.Reviewer = ""
 		return cfg
 	}
-	orchestratorModel := askString(reader, "Orchestrator model", "gpt-4.1")
-	orchestratorKey := askSecret(reader, "Orchestrator API key", "")
+	profile := llmProviderProfile(provider)
+	apiKey := askSecret(reader, "LLM API key", "")
+	baseURL := normalizeServerURL(profile.Type, askString(reader, "LLM provider base URL", profile.BaseURL))
+	model := askString(reader, "Planning model", profile.Model)
+	reviewerModel := askString(reader, "Review model", model)
 	if cfg.Providers == nil {
 		cfg.Providers = map[string]config.Provider{}
 	}
-	cfg.Providers["frontier-orchestrator"] = config.Provider{
-		Type:          "vllm",
-		ServerURL:     strings.TrimRight(orchestratorURL, "/"),
-		Model:         orchestratorModel,
-		APIKey:        orchestratorKey,
+	cfg.Providers["planning-llm"] = config.Provider{
+		Type:          profile.Type,
+		ServerURL:     baseURL,
+		Model:         model,
+		APIKey:        apiKey,
 		ContextWindow: 128000,
 	}
-	cfg.ModelRoles.Orchestrator = "frontier-orchestrator"
-	reviewerURL := askString(reader, "Reviewer base URL", orchestratorURL)
-	reviewerModel := askString(reader, "Reviewer model", orchestratorModel)
-	reviewerKey := askSecret(reader, "Reviewer API key", orchestratorKey)
-	cfg.Providers["frontier-reviewer"] = config.Provider{
-		Type:          "vllm",
-		ServerURL:     strings.TrimRight(reviewerURL, "/"),
+	cfg.ModelRoles.Orchestrator = "planning-llm"
+	cfg.Providers["review-llm"] = config.Provider{
+		Type:          profile.Type,
+		ServerURL:     baseURL,
 		Model:         reviewerModel,
-		APIKey:        reviewerKey,
+		APIKey:        apiKey,
 		ContextWindow: 128000,
 	}
-	cfg.ModelRoles.Reviewer = "frontier-reviewer"
+	cfg.ModelRoles.Reviewer = "review-llm"
 	return cfg
+}
+
+type llmProviderDefaults struct {
+	Type    string
+	BaseURL string
+	Model   string
+}
+
+func llmProviderProfile(provider string) llmProviderDefaults {
+	switch provider {
+	case "openai":
+		return llmProviderDefaults{Type: "vllm", BaseURL: "https://api.openai.com", Model: "gpt-4.1"}
+	case "claude":
+		return llmProviderDefaults{Type: "anthropic", BaseURL: "https://api.anthropic.com", Model: "claude-sonnet-4-5"}
+	default:
+		return llmProviderDefaults{Type: "vllm", BaseURL: "https://host", Model: "model-name"}
+	}
 }
 
 func configureTools(reader *bufio.Reader, cfg config.Config) config.Config {
@@ -374,6 +394,8 @@ func normalizeServerURL(providerType, raw string) string {
 		u = strings.TrimSuffix(u, "/v1")
 	case "ollama":
 		u = strings.TrimSuffix(u, "/api")
+	case "anthropic":
+		u = strings.TrimSuffix(u, "/v1")
 	}
 	return u
 }

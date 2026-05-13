@@ -76,6 +76,54 @@ func TestWriteConfigStoresContextWindow(t *testing.T) {
 	}
 }
 
+func TestConfigureLLMProviderOpenAI(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("1\nsk-test\n\ngpt-test\nreview-test\n"))
+	cfg := config.Default()
+
+	got := configureLLMProvider(reader, cfg)
+
+	if got.ModelRoles.Orchestrator != "planning-llm" || got.ModelRoles.Reviewer != "review-llm" {
+		t.Fatalf("ModelRoles = %#v", got.ModelRoles)
+	}
+	planner := got.Providers["planning-llm"]
+	if planner.Type != "vllm" || planner.ServerURL != "https://api.openai.com" || planner.Model != "gpt-test" || planner.APIKey != "sk-test" {
+		t.Fatalf("planning provider = %#v", planner)
+	}
+	reviewer := got.Providers["review-llm"]
+	if reviewer.Type != "vllm" || reviewer.Model != "review-test" || reviewer.APIKey != "sk-test" {
+		t.Fatalf("review provider = %#v", reviewer)
+	}
+}
+
+func TestConfigureLLMProviderClaude(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("2\nclaude-key\n\n\n"))
+	cfg := config.Default()
+
+	got := configureLLMProvider(reader, cfg)
+
+	planner := got.Providers["planning-llm"]
+	if planner.Type != "anthropic" || planner.ServerURL != "https://api.anthropic.com" || planner.Model != "claude-sonnet-4-5" || planner.APIKey != "claude-key" {
+		t.Fatalf("planning provider = %#v", planner)
+	}
+	reviewer := got.Providers["review-llm"]
+	if reviewer.Type != "anthropic" || reviewer.Model != "claude-sonnet-4-5" || reviewer.APIKey != "claude-key" {
+		t.Fatalf("review provider = %#v", reviewer)
+	}
+}
+
+func TestConfigureLLMProviderNoneUsesLocalRoles(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("4\n"))
+	cfg := config.Default()
+	cfg.ModelRoles.Orchestrator = "planning-llm"
+	cfg.ModelRoles.Reviewer = "review-llm"
+
+	got := configureLLMProvider(reader, cfg)
+
+	if got.ModelRoles.Orchestrator != "" || got.ModelRoles.Reviewer != "" {
+		t.Fatalf("ModelRoles = %#v, want planning/review reset for local fallback", got.ModelRoles)
+	}
+}
+
 func TestConfigureToolsClearsKeysWithDash(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("-\n-\n-\n2\n"))
 	cfg := config.Config{

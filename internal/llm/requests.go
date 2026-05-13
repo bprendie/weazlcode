@@ -98,7 +98,93 @@ func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxT
 	return strings.TrimSpace(body.Message.Content), usage, nil
 }
 
+func (c Client) completeAnthropic(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {
+	system, chat := anthropicMessages(messages)
+	reqBody := map[string]any{
+		"model":       c.provider.Model,
+		"messages":    chat,
+		"temperature": 0.2,
+		"max_tokens":  maxTokens,
+	}
+	if system != "" {
+		reqBody["system"] = system
+	}
+	resp, err := c.postAnthropic(ctx, "/v1/messages", reqBody)
+	if err != nil {
+		return "", Usage{}, err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Usage *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", Usage{}, err
+	}
+	if body.Error != nil {
+		return "", Usage{}, errors.New(body.Error.Message)
+	}
+	var content strings.Builder
+	for _, block := range body.Content {
+		if block.Type == "text" && block.Text != "" {
+			content.WriteString(block.Text)
+		}
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return "", Usage{}, errors.New("empty completion response")
+	}
+	var usage Usage
+	if body.Usage != nil {
+		usage.InputTokens = body.Usage.InputTokens
+		usage.OutputTokens = body.Usage.OutputTokens
+	}
+	return strings.TrimSpace(content.String()), usage, nil
+}
+
+func anthropicMessages(messages []ChatMessage) (string, []map[string]string) {
+	var system []string
+	chat := make([]map[string]string, 0, len(messages))
+	for _, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		switch message.Role {
+		case "system":
+			system = append(system, content)
+		case "assistant":
+			chat = append(chat, map[string]string{"role": "assistant", "content": content})
+		default:
+			chat = append(chat, map[string]string{"role": "user", "content": content})
+		}
+	}
+	return strings.Join(system, "\n\n"), chat
+}
+
 func (c Client) post(ctx context.Context, path string, body any) (*http.Response, error) {
+	return c.postJSON(ctx, path, body, nil)
+}
+
+func (c Client) postAnthropic(ctx context.Context, path string, body any) (*http.Response, error) {
+	headers := map[string]string{
+		"anthropic-version": "2023-06-01",
+	}
+	if c.provider.APIKey != "" {
+		headers["x-api-key"] = c.provider.APIKey
+	}
+	return c.postJSON(ctx, path, body, headers)
+}
+
+func (c Client) postJSON(ctx context.Context, path string, body any, headers map[string]string) (*http.Response, error) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
@@ -113,8 +199,11 @@ func (c Client) post(ctx context.Context, path string, body any) (*http.Response
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if c.provider.APIKey != "" {
+		if c.provider.APIKey != "" && strings.ToLower(c.provider.Type) != "anthropic" {
 			req.Header.Set("Authorization", "Bearer "+c.provider.APIKey)
+		}
+		for name, value := range headers {
+			req.Header.Set(name, value)
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -176,6 +265,8 @@ func baseURL(provider config.Provider) string {
 		u = strings.TrimSuffix(u, "/v1")
 	case "ollama":
 		u = strings.TrimSuffix(u, "/api")
+	case "anthropic":
+		u = strings.TrimSuffix(u, "/v1")
 	}
 	return u
 }

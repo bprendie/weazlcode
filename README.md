@@ -51,12 +51,16 @@ go run ./cmd/weazlcode
 
 The installer takes care of the heavy lifting. It builds `weazlcode`, tucks it into `~/.weazlcode/bin`, and adds that directory to your shell `PATH` if it is not already present.
 
-During setup, you configure the local worker first, usually Ollama or vLLM. The script queries the provider for available models, optionally lets you point orchestrator and reviewer roles at OpenAI-compatible frontier endpoints, takes your tool API keys, writes `~/.config/weazlcode/config.json`, and boots straight into the TUI.
+During setup, you configure the local worker first, usually Ollama or vLLM. The script queries the provider for available models, then asks for an optional LLM provider for planning and review. OpenAI and Claude are suggested starting points; custom OpenAI-compatible endpoints are supported too. If you choose `none`, WeazlCode uses the configured local model provider for planning and review and warns that planning mode may not be as robust.
+
+For an LLM provider, setup asks for the API key, provider base URL, planning model, and review model. It writes those into `~/.config/weazlcode/config.json`, then boots straight into the TUI.
 
 Provider URL rules: base URLs only, please.
 
 - vLLM: `https://host:port` or `https://host`, without `/v1`
 - Ollama: `http://host:11434`, without `/api`
+- OpenAI-compatible: `https://host`, without `/v1`
+- Claude/Anthropic: `https://api.anthropic.com`, without `/v1`
 
 If you accidentally paste the `/v1` or `/api` suffixes, the installer quietly fixes them for you. Tool API keys are optional: leave a prompt blank to keep an existing key, or type `-` to clear it.
 

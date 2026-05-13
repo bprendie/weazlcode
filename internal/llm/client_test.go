@@ -152,6 +152,50 @@ func TestCompleteWithUsageOllama(t *testing.T) {
 	}
 }
 
+func TestCompleteWithUsageAnthropic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Fatalf("x-api-key = %q, want test-key", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got == "" {
+			t.Fatal("anthropic-version header missing")
+		}
+		if got := r.Header.Get("authorization"); got != "" {
+			t.Fatalf("authorization header = %q, want empty", got)
+		}
+		var req struct {
+			Model     string              `json:"model"`
+			System    string              `json:"system"`
+			Messages  []map[string]string `json:"messages"`
+			MaxTokens int                 `json:"max_tokens"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.System == "" || len(req.Messages) != 1 || req.Messages[0]["role"] != "user" {
+			t.Fatalf("request = %#v", req)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":" done "}],"usage":{"input_tokens":31,"output_tokens":7}}`))
+	}))
+	defer server.Close()
+
+	client := New(config.Provider{Type: "anthropic", Model: "claude-test", ServerURL: server.URL, APIKey: "test-key"})
+	content, usage, err := client.CompleteWithUsage(context.Background(), []ChatMessage{{Role: "system", Content: "system"}, {Role: "user", Content: "hello"}}, 64)
+	if err != nil {
+		t.Fatalf("CompleteWithUsage returned error: %v", err)
+	}
+	if content != "done" {
+		t.Fatalf("content = %q, want done", content)
+	}
+	if usage.InputTokens != 31 || usage.OutputTokens != 7 {
+		t.Fatalf("usage = %#v, want 31/7", usage)
+	}
+}
+
 func TestCompleteWithUsageRetriesTransientHTTPFailures(t *testing.T) {
 	oldDelay := postRetryDelay
 	postRetryDelay = func(int) time.Duration { return 0 }
