@@ -234,13 +234,12 @@ func (m model) metricsView() string {
 	budget := m.contextBudget()
 	contextTokens := m.contextTokenEstimate()
 	pct := min(1.0, float64(contextTokens)/float64(budget))
-	parts := []string{
-		m.project.StatusLabel(),
+	parts := append(m.statusBadges(contextTokens, budget),
 		fmt.Sprintf("ctx %s %d/%d", m.contextBar.ViewAs(pct), contextTokens, budget),
 		fmt.Sprintf("in %d", totalIn),
 		fmt.Sprintf("out %d", totalOut),
 		fmt.Sprintf("%.1f t/s", tps),
-	}
+	)
 	if badge := m.taskProgressBadge(); badge != "" {
 		parts = append(parts, badge)
 	}

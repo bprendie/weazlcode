@@ -97,7 +97,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add recent command output panel.
 - [ ] Add fuzzy file picker.
 - [ ] Add file preview pane.
-- [ ] Add status badges for dirty repo, current branch, active role, and context usage.
+- [x] Add status badges for dirty repo, current branch, active role, and context usage.
 - [ ] Keep existing copy/mouse/scroll behavior working.
 
 ## Milestone 7: LSP Foundation
