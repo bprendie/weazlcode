@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/bprendie/weazlcode/internal/coding"
 	"github.com/bprendie/weazlcode/internal/lsp"
+	"github.com/bprendie/weazlcode/internal/project"
 )
 
 const maxRepairAttempts = 2
@@ -62,6 +65,18 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("definition", m.definitionCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "references":
 		m.setIDEView("references", m.referencesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "instructions":
+		m.setIDEView("instructions", m.instructionsCommandText())
+	case "memory":
+		return m.handleProjectMemoryCommand(fields[1:], strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
+	case "final-review":
+		m.setIDEView("final-review", m.finalReviewCommandText())
+	case "commit-message":
+		m.setIDEView("commit-message", m.commitMessageCommandText())
+	case "commit":
+		return m.commitCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
+	case "export-run":
+		m.setIDEView("export-run", m.exportRunCommandText())
 	case "chat":
 		m.mode = modeChat
 		m.status = "chat"
@@ -167,6 +182,12 @@ func slashHelp() string {
 		"/symbols [query] - search project symbols",
 		"/definition <symbol> - show symbol definition",
 		"/references <symbol> - show symbol references",
+		"/instructions - show project instructions and discovered commands",
+		"/memory [key=value] - list or save project memory",
+		"/final-review - summarize latest reviewed task and current diff",
+		"/commit-message - generate a commit message from the final review",
+		"/commit yes - git add and commit with generated message",
+		"/export-run - write latest task review artifact under .weazlcode/runs",
 		"/chat - return to chat transcript",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
@@ -485,11 +506,13 @@ func (m model) runTaskVerification(task coding.Task) ([]verificationResult, erro
 
 func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	diagnostics := m.codingDiagnostics()
+	allowedTools := []string{"read_file", "read_file_range", "search_files", "apply_patch"}
 	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
 		DefaultAllowed: []string{
 			".",
 		},
+		DefaultTools: allowedTools,
 		DefaultVerify: []string{
 			"go test ./...",
 		},
@@ -630,6 +653,7 @@ func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
+	instructions, _, _ := project.LoadInstructions(m.project.Root)
 	return coding.ReviewerInput{
 		Plan:              plan,
 		TaskPacket:        packet,
@@ -637,6 +661,7 @@ func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
 		VerificationOut:   verificationOutputFromEvents(events),
 		TaskEventsSummary: taskEventsSummary(events),
 		Constraints: []string{
+			"Project instructions:\n" + strings.TrimSpace(instructions.Content),
 			"Review only the current task requirements and allowed paths.",
 			"Return JSON with verdict approve, needs_fix, or blocked.",
 			"Use needs_fix for focused repairable issues; use blocked only when more context or user input is required.",
@@ -876,6 +901,179 @@ func workerStartMessage(task coding.Task) string {
 		return "Repair task marked running; worker packet prepared for local model dispatch."
 	}
 	return "Task marked running; worker packet prepared for local model dispatch."
+}
+
+func (m model) instructionsCommandText() string {
+	instructions, ok, err := project.LoadInstructions(m.project.Root)
+	if err != nil {
+		return "Instructions error: " + err.Error()
+	}
+	commands := project.DiscoverCommands(m.project.Root)
+	var b strings.Builder
+	b.WriteString("Project instructions:\n")
+	if ok {
+		fmt.Fprintf(&b, "file: %s\n\n%s", filepath.Base(instructions.Path), strings.TrimSpace(instructions.Content))
+	} else {
+		b.WriteString("No WEAZLCODE.md or AGENTS.md found. Run `weazlcode init`.\n")
+	}
+	if len(commands) > 0 {
+		b.WriteString("\n\nDiscovered commands:")
+		for _, command := range commands {
+			fmt.Fprintf(&b, "\n- %s", command)
+		}
+	}
+	memories, err := m.store.ProjectMemories(m.project.Root, 10)
+	if err == nil && len(memories) > 0 {
+		b.WriteString("\n\nProject memory:")
+		for _, memory := range memories {
+			fmt.Fprintf(&b, "\n- %s: %s", memory.Key, memory.Value)
+		}
+	}
+	return b.String()
+}
+
+func (m model) handleProjectMemoryCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {
+	_ = args
+	rawArgs = strings.TrimSpace(rawArgs)
+	if rawArgs == "" {
+		m.setIDEView("memory", m.projectMemoryText())
+		return m, nil, true
+	}
+	key, value, ok := strings.Cut(rawArgs, "=")
+	if !ok || strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+		m.addSystemNote("Usage: /memory key=value")
+		m.status = "memory usage"
+		return m, nil, true
+	}
+	if err := m.store.RememberProject(m.project.Root, strings.TrimSpace(key), strings.TrimSpace(value), "project"); err != nil {
+		m.addSystemNote("Project memory error: " + err.Error())
+		m.status = "memory failed"
+		return m, nil, true
+	}
+	m.addSystemNote("Saved project memory: " + strings.TrimSpace(key))
+	m.status = "memory saved"
+	return m, nil, true
+}
+
+func (m model) projectMemoryText() string {
+	memories, err := m.store.ProjectMemories(m.project.Root, 50)
+	if err != nil {
+		return "Project memory error: " + err.Error()
+	}
+	if len(memories) == 0 {
+		return "Project memory:\nNo project memories yet. Use `/memory key=value`."
+	}
+	var b strings.Builder
+	b.WriteString("Project memory:\n")
+	for _, memory := range memories {
+		fmt.Fprintf(&b, "- %s: %s", memory.Key, memory.Value)
+		if memory.Tags != "" {
+			fmt.Fprintf(&b, " [%s]", memory.Tags)
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) finalReviewCommandText() string {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		return "Final review error: " + err.Error()
+	}
+	diff, diffErr := m.gitDiff()
+	if !ok {
+		if diffErr != nil {
+			return "Final review error: " + diffErr.Error()
+		}
+		return "Final review:\nNo plan found.\n\nDiff:\n" + emptyFallback(diff, "No changes.")
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Final review:\nplan: %s\nstatus: %s\n", plan.Title, plan.Status)
+	for _, task := range plan.Tasks {
+		fmt.Fprintf(&b, "- [%s] %s\n", task.Status, task.Title)
+		events, err := m.store.TaskEvents(task.ID)
+		if err == nil {
+			if verdict, ok := latestReviewVerdict(events); ok {
+				fmt.Fprintf(&b, "  reviewer: %s - %s\n", verdict.Verdict, verdict.Summary)
+			}
+		}
+	}
+	if diffErr != nil {
+		fmt.Fprintf(&b, "\nDiff error: %s", diffErr)
+	} else {
+		fmt.Fprintf(&b, "\nDiff:\n%s", emptyFallback(diff, "No changes."))
+	}
+	fmt.Fprintf(&b, "\n\nRollback guidance:\n- Review the diff before committing.\n- To discard uncommitted changes manually, use git restore on specific files.")
+	return b.String()
+}
+
+func (m model) commitMessageCommandText() string {
+	return m.generatedCommitMessage()
+}
+
+func (m model) generatedCommitMessage() string {
+	plan, ok, _ := m.store.LatestPlan(m.session.ID)
+	if ok && strings.TrimSpace(plan.Title) != "" {
+		return "Complete " + strings.TrimSpace(plan.Title)
+	}
+	diff, err := m.gitDiff()
+	if err != nil || strings.TrimSpace(diff) == "" {
+		return "Update WeazlCode project"
+	}
+	return "Update project files"
+}
+
+func (m model) commitCommand(raw string) (tea.Model, tea.Cmd, bool) {
+	if strings.ToLower(strings.TrimSpace(raw)) != "yes" {
+		m.addSystemNote("Commit is confirmation-gated. Use `/commit yes` to run `git add .` and `git commit` with the generated message.")
+		m.status = "commit needs confirmation"
+		return m, nil, true
+	}
+	message := m.generatedCommitMessage()
+	if out, err := runGitCommit(m.project.Root, message); err != nil {
+		m.addSystemNote("Commit error:\n" + out + "\n" + err.Error())
+		m.status = "commit failed"
+		return m, nil, true
+	}
+	m.addSystemNote("Committed changes:\n" + message)
+	m.status = "committed"
+	return m, nil, true
+}
+
+func (m model) exportRunCommandText() string {
+	text := m.finalReviewCommandText()
+	dir := filepath.Join(m.project.StateDir, "runs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "Export error: " + err.Error()
+	}
+	path := filepath.Join(dir, time.Now().Format("20060102-150405")+".md")
+	body := "# WeazlCode Run Artifact\n\n" + text + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return "Export error: " + err.Error()
+	}
+	return "Exported run artifact:\n" + path
+}
+
+func latestReviewVerdict(events []coding.TaskEvent) (coding.ReviewVerdict, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type == "reviewer_verdict" {
+			return reviewVerdictFromEvent(events[i])
+		}
+	}
+	return coding.ReviewVerdict{}, false
+}
+
+func runGitCommit(root, message string) (string, error) {
+	add := exec.Command("git", "add", ".")
+	add.Dir = root
+	out, err := add.CombinedOutput()
+	if err != nil {
+		return string(out), err
+	}
+	commit := exec.Command("git", "commit", "-m", message)
+	commit.Dir = root
+	commitOut, err := commit.CombinedOutput()
+	return string(out) + string(commitOut), err
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {

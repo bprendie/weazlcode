@@ -193,3 +193,45 @@ func (s *Store) scanMemories(rows *sql.Rows) ([]Memory, error) {
 	}
 	return memories, rows.Err()
 }
+
+func (s *Store) RememberProject(projectRoot, key, value, tags string) error {
+	projectRoot = strings.TrimSpace(projectRoot)
+	key = strings.TrimSpace(key)
+	if projectRoot == "" {
+		return errors.New("project root is required")
+	}
+	if key == "" {
+		return errors.New("project memory key is required")
+	}
+	_, err := s.db.Exec(
+		`insert into project_memories (project_root, key, value, tags, updated_at)
+		 values (?, ?, ?, ?, current_timestamp)
+		 on conflict(project_root, key) do update set value = excluded.value, tags = excluded.tags, updated_at = current_timestamp`,
+		projectRoot, key, value, tags,
+	)
+	return err
+}
+
+func (s *Store) ProjectMemories(projectRoot string, limit int) ([]ProjectMemory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.db.Query(
+		`select id, project_root, key, value, coalesce(tags, ''), created_at, updated_at
+		 from project_memories where project_root = ? order by updated_at desc limit ?`,
+		projectRoot, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var memories []ProjectMemory
+	for rows.Next() {
+		var memory ProjectMemory
+		if err := rows.Scan(&memory.ID, &memory.ProjectRoot, &memory.Key, &memory.Value, &memory.Tags, &memory.CreatedAt, &memory.UpdatedAt); err != nil {
+			return nil, err
+		}
+		memories = append(memories, memory)
+	}
+	return memories, rows.Err()
+}

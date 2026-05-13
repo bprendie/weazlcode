@@ -12,12 +12,26 @@
       "server_url": "http://localhost:11434",
       "model": "llama3.1",
       "context_window": 32768
+    },
+    "frontier-orchestrator": {
+      "type": "vllm",
+      "server_url": "https://api.example.com",
+      "model": "frontier-planner",
+      "api_key": "YOUR_FRONTIER_API_KEY_HERE",
+      "context_window": 128000
+    },
+    "frontier-reviewer": {
+      "type": "vllm",
+      "server_url": "https://api.example.com",
+      "model": "frontier-reviewer",
+      "api_key": "YOUR_FRONTIER_API_KEY_HERE",
+      "context_window": 128000
     }
   },
   "model_roles": {
-    "orchestrator": "local-vllm",
+    "orchestrator": "frontier-orchestrator",
     "worker": "local-ollama",
-    "reviewer": "local-vllm",
+    "reviewer": "frontier-reviewer",
     "summarizer": "local-ollama"
   },
   "database": {

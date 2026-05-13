@@ -62,6 +62,16 @@ type Memory struct {
 	UpdatedAt time.Time
 }
 
+type ProjectMemory struct {
+	ID          int64
+	ProjectRoot string
+	Key         string
+	Value       string
+	Tags        string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
 type ContextCheckpoint struct {
 	ID               int64
 	SessionID        string
@@ -124,6 +134,16 @@ func (s *Store) Migrate() error {
 			created_at datetime not null default current_timestamp,
 			updated_at datetime not null default current_timestamp
 		)`,
+		`create table if not exists project_memories (
+			id integer primary key autoincrement,
+			project_root text not null,
+			key text not null,
+			value text not null,
+			tags text,
+			created_at datetime not null default current_timestamp,
+			updated_at datetime not null default current_timestamp,
+			unique(project_root, key)
+		)`,
 		`create table if not exists context_checkpoints (
 			id integer primary key autoincrement,
 			session_id text not null references sessions(id) on delete cascade,
@@ -166,6 +186,7 @@ func (s *Store) Migrate() error {
 		`create index if not exists idx_messages_session on messages(session_id, id)`,
 		`create index if not exists idx_sessions_updated on sessions(updated_at desc)`,
 		`create index if not exists idx_memories_updated on memories(updated_at desc)`,
+		`create index if not exists idx_project_memories_root on project_memories(project_root, updated_at desc)`,
 		`create index if not exists idx_context_checkpoints_session on context_checkpoints(session_id, id desc)`,
 		`create index if not exists idx_plans_session on plans(session_id, updated_at desc)`,
 		`create index if not exists idx_tasks_plan on tasks(plan_id, created_at)`,

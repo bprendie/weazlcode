@@ -14,11 +14,11 @@ func (m model) startStream(ch chan<- streamEvent, prompt string, history []stora
 	return func() tea.Msg {
 		go func() {
 			defer close(ch)
-			client := llm.New(m.cfg.Active())
+			client := llm.New(m.cfg.ProviderForRole("orchestrator"))
 
 			if m.cfg.Tools.Enabled && m.toolRegistry != nil {
 				toolDefs := m.toolRegistry.ToOpenAIFormat()
-				if strings.ToLower(m.cfg.Active().Type) == "ollama" {
+				if strings.ToLower(m.cfg.ProviderForRole("orchestrator").Type) == "ollama" {
 					toolDefs = m.toolRegistry.ToOllamaFormat()
 				}
 				client = client.WithTools(toolDefs)

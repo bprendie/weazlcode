@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/bprendie/weazlcode/internal/config"
+	"github.com/bprendie/weazlcode/internal/project"
 	"github.com/bprendie/weazlcode/internal/storage"
 )
 
@@ -119,15 +120,35 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		m.working.Spinner = spinner.Jump
 		m.streamText = ""
 		m.streamAt = time.Now()
-		m.reqIn = estimateMessages(contextHistory) + estimateTokens(prompt)
+		modelPrompt := m.orchestratorPrompt(prompt)
+		m.reqIn = estimateMessages(contextHistory) + estimateTokens(modelPrompt)
 		m.reqOut = 0
 		m.err = ""
-		m.status = "streaming"
+		m.status = "streaming orchestrator"
 		ch := make(chan streamEvent, 64)
 		m.stream = ch
-		return m, tea.Batch(m.startStream(ch, prompt, contextHistory), waitStream(ch), m.working.Tick)
+		return m, tea.Batch(m.startStream(ch, modelPrompt, contextHistory), waitStream(ch), m.working.Tick)
 	}
 	return m, nil
+}
+
+func (m model) orchestratorPrompt(prompt string) string {
+	var sections []string
+	if instructions, ok, err := project.LoadInstructions(m.project.Root); err == nil && ok && strings.TrimSpace(instructions.Content) != "" {
+		sections = append(sections, "Project instructions from "+project.PrimaryInstructionsFile+":\n"+strings.TrimSpace(instructions.Content))
+	}
+	if memories, err := m.store.ProjectMemories(m.project.Root, 10); err == nil && len(memories) > 0 {
+		var b strings.Builder
+		b.WriteString("Project memory:")
+		for _, memory := range memories {
+			fmt.Fprintf(&b, "\n- %s: %s", memory.Key, memory.Value)
+		}
+		sections = append(sections, b.String())
+	}
+	if len(sections) == 0 {
+		return prompt
+	}
+	return strings.Join(sections, "\n\n") + "\n\nUser request:\n" + prompt
 }
 
 func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {

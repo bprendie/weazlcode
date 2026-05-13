@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,6 +15,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		if handled, code := handleCLI(os.Args[1:]); handled {
+			os.Exit(code)
+		}
+	}
 	cfg, cfgPath, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
@@ -79,5 +85,32 @@ func main() {
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "tui: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func handleCLI(args []string) (bool, int) {
+	switch strings.ToLower(args[0]) {
+	case "init":
+		summary, err := project.Detect("")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "project: %v\n", err)
+			return true, 1
+		}
+		path, err := project.InitInstructions(summary.Root, summary)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "init: %v\n", err)
+			return true, 1
+		}
+		fmt.Printf("Wrote %s\n", path)
+		return true, 0
+	case "help", "--help", "-h":
+		fmt.Println("WeazlCode")
+		fmt.Println("")
+		fmt.Println("Usage:")
+		fmt.Println("  weazlcode          start the TUI")
+		fmt.Println("  weazlcode init     create WEAZLCODE.md project instructions")
+		return true, 0
+	default:
+		return false, 0
 	}
 }

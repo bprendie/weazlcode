@@ -8,12 +8,14 @@ import (
 )
 
 type TaskPacket struct {
+	Role             string            `json:"role"`
 	TaskID           string            `json:"task_id"`
 	PlanID           string            `json:"plan_id"`
 	Goal             string            `json:"goal"`
 	AllowedPaths     []string          `json:"allowed_paths"`
 	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
 	ContextFiles     []ContextFile     `json:"context_files,omitempty"`
+	ContextPolicy    ContextPolicy     `json:"context_policy"`
 	Diagnostics      []Diagnostic      `json:"diagnostics,omitempty"`
 	ToolsAllowed     []string          `json:"tools_allowed"`
 	Verification     []string          `json:"verification,omitempty"`
@@ -26,6 +28,12 @@ type ContextFile struct {
 	EndLine   int    `json:"end_line,omitempty"`
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type ContextPolicy struct {
+	Mode         string   `json:"mode"`
+	RequestTools []string `json:"request_tools"`
+	Instruction  string   `json:"instruction"`
 }
 
 type Diagnostic struct {
@@ -93,12 +101,18 @@ func BuildTaskPacket(task Task, opts ContextPackOptions) (TaskPacket, error) {
 		return TaskPacket{}, err
 	}
 	packet := TaskPacket{
-		TaskID:           task.ID,
-		PlanID:           task.PlanID,
-		Goal:             task.Goal,
-		AllowedPaths:     allowed,
-		ForbiddenPaths:   task.ForbiddenPaths,
-		ContextFiles:     contextFiles,
+		Role:           "worker",
+		TaskID:         task.ID,
+		PlanID:         task.PlanID,
+		Goal:           task.Goal,
+		AllowedPaths:   allowed,
+		ForbiddenPaths: task.ForbiddenPaths,
+		ContextFiles:   contextFiles,
+		ContextPolicy: ContextPolicy{
+			Mode:         "tool_requested",
+			RequestTools: []string{"read_file", "read_file_range", "search_files"},
+			Instruction:  "Use approved context tools for missing details; do not assume repo-wide context.",
+		},
 		Diagnostics:      opts.Diagnostics,
 		ToolsAllowed:     tools,
 		Verification:     verification,

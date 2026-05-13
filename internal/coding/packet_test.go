@@ -32,11 +32,14 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTaskPacket: %v", err)
 	}
-	if packet.TaskID != "task-1" || len(packet.ContextFiles) != 1 {
+	if packet.Role != "worker" || packet.TaskID != "task-1" || len(packet.ContextFiles) != 1 {
 		t.Fatalf("packet = %#v", packet)
 	}
 	if packet.ContextFiles[0].Content != "two\nthree" {
 		t.Fatalf("content = %q", packet.ContextFiles[0].Content)
+	}
+	if packet.ContextPolicy.Mode != "tool_requested" || len(packet.ContextPolicy.RequestTools) == 0 {
+		t.Fatalf("context policy = %#v", packet.ContextPolicy)
 	}
 }
 

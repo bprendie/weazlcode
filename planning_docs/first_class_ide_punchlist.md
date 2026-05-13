@@ -57,10 +57,10 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Extend config with model roles: `orchestrator`, `worker`, `reviewer`, `summarizer`.
 - [x] Preserve existing `active_provider` behavior as a compatibility default.
 - [x] Add role-to-provider resolution in config.
-- [ ] Let setup configure local worker first.
-- [ ] Let config manually point orchestrator/reviewer to API-compatible frontier endpoints.
-- [ ] Add role labels to status output and model run logs.
-- [ ] Keep worker model access restricted to task packets and approved tools.
+- [x] Let setup configure local worker first.
+- [x] Let config manually point orchestrator/reviewer to API-compatible frontier endpoints.
+- [x] Add role labels to status output and model run logs.
+- [x] Keep worker model access restricted to task packets and approved tools.
 
 ## Milestone 4: Structured Plans
 
@@ -77,7 +77,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 - [x] Create task packet format for the worker model.
 - [x] Include goal, allowed paths, forbidden paths, relevant files, command limits, and acceptance checks.
-- [ ] Worker can request context through tools instead of receiving the whole repo.
+- [x] Worker can request context through tools instead of receiving the whole repo.
 - [x] Worker produces a patch, not a free-form final answer.
 - [x] Gate task dispatch on approved plans and mark selected tasks running.
 - [x] Apply patch only after path validation.
@@ -114,20 +114,20 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Milestone 8: First-Class Project Instructions
 
-- [ ] Decide primary instruction file: `AGENTS.md`, `WEAZLCODE.md`, or both.
-- [ ] Add `weazlcode init`.
-- [ ] Generate project instructions from detected commands, layout, and conventions.
-- [ ] Load project instructions into orchestrator context.
-- [ ] Add command discovery for common test/build/lint commands.
-- [ ] Add project memory records distinct from chat memories.
+- [x] Decide primary instruction file: `AGENTS.md`, `WEAZLCODE.md`, or both.
+- [x] Add `weazlcode init`.
+- [x] Generate project instructions from detected commands, layout, and conventions.
+- [x] Load project instructions into orchestrator context.
+- [x] Add command discovery for common test/build/lint commands.
+- [x] Add project memory records distinct from chat memories.
 
 ## Milestone 9: Review And Commit Workflow
 
-- [ ] Add final review summary.
-- [ ] Add generated commit message.
-- [ ] Add optional `git add`/`git commit` flow behind confirmation.
-- [ ] Add rollback guidance using patch reverse or git checkout instructions.
-- [ ] Add session artifact export under `.weazlcode/runs/`.
+- [x] Add final review summary.
+- [x] Add generated commit message.
+- [x] Add optional `git add`/`git commit` flow behind confirmation.
+- [x] Add rollback guidance using patch reverse or git checkout instructions.
+- [x] Add session artifact export under `.weazlcode/runs/`.
 
 ## Later Extensions
 
@@ -141,10 +141,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Move or rewrite `handover.md` into project-native guidance.
-2. Add `internal/project` and project root detection.
-3. Add git status/diff/log tools.
-4. Add `apply_patch` with path restrictions.
-5. Add model roles in config.
-6. Add plan structs and SQLite tables.
-7. Build the first single-worker task loop.
+1. Harden `weazlcode init` templates through real project use.
+2. Exercise the single-worker loop against local Ollama/vLLM models.
+3. Use frontier planner/reviewer roles on an API-compatible endpoint.
+4. Expand LSP support beyond the current Go-first foundation.
+5. Keep parallel workers in Later Extensions until single-worker reliability is proven.

@@ -32,7 +32,7 @@ go run ./cmd/weazlcode
 
 The installer takes care of the heavy lifting. It builds `weazlcode`, tucks it into `~/.weazlcode/bin`, and adds that directory to your shell `PATH` if it is not already present.
 
-During setup, you will be prompted for your provider type and URL. The script queries the provider for available models, optionally takes your tool API keys, writes `~/.config/weazlcode/config.json`, and boots straight into the TUI.
+During setup, you configure the local worker first, usually Ollama or vLLM. The script queries the provider for available models, optionally lets you point orchestrator and reviewer roles at OpenAI-compatible frontier endpoints, takes your tool API keys, writes `~/.config/weazlcode/config.json`, and boots straight into the TUI.
 
 Provider URL rules: base URLs only, please.
 
@@ -103,11 +103,19 @@ Run setup first if you want the guided config flow:
 .\weazlcode.exe
 ```
 
+Initialize project instructions from the repo root:
+
+```sh
+weazlcode init
+```
+
+That writes `WEAZLCODE.md`, which is the primary WeazlCode instruction file. Existing `AGENTS.md` files are also read as a fallback.
+
 ## Keys
 
 - `enter`: send message / select session
-- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/files`, `/preview`, `/lsp`, `/diagnostics`, `/symbols`, `/definition`, `/references`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
-- `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/worker-patch`, `/reviewer-input`, and `/review` inspect or advance the latest plan
+- `/`: start a local command such as `/help`, `/project`, `/models`, `/tools`, `/config`, `/diff`, `/outputs`, `/files`, `/preview`, `/lsp`, `/diagnostics`, `/symbols`, `/definition`, `/references`, `/instructions`, `/memory`, `/final-review`, `/commit-message`, `/chat`, `/sessions`, `/workspaces`, `/new`, `/clear`, `/trim`, `/copy`, or `/mouse`
+- `/plan draft <title>` / `/plan import <json>`: create or import a structured coding plan; `/plan`, `/tasks`, `/packet`, `/approve`, `/reject`, `/run-task`, `/worker-patch`, `/reviewer-input`, `/review`, `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` inspect or advance the latest plan
 - `up` / `down`: recall previous prompts in the current session
 - mouse wheel: scroll chat history
 - `pgup` / `pgdown`: scroll chat history
@@ -231,6 +239,19 @@ Workspace tools operate under configured `workspace_roots`; WeazlCode also adds 
 
 `create_file` only creates new text files under `workspace_roots`; it flat out refuses to overwrite existing files.
 Tool calls are logged as JSONL under `.weazlcode/logs/tool_calls.jsonl` for project-local auditability.
+
+## Coding IDE Workflow
+
+WeazlCode now has the first full single-worker coding loop:
+
+1. Frontier-capable orchestrator context includes `WEAZLCODE.md` or fallback `AGENTS.md`, discovered project commands, project memory, and the current session.
+2. `/plan draft` or `/plan import` creates a structured plan, and `/approve` gates worker execution.
+3. `/packet` and `/run-task` create bounded worker task packets with allowed paths, diagnostics, verification commands, approved tools, and a context policy that tells local workers to request missing context through `read_file`, `read_file_range`, or `search_files`.
+4. `/worker-patch` imports a patch or blocker. Patches are path-validated, applied, verified, and moved to review.
+5. `/reviewer-input` prepares the frontier review payload. `/review` accepts `approve`, `needs_fix`, or `blocked`, with capped repair loops.
+6. `/final-review`, `/commit-message`, `/commit yes`, and `/export-run` cover the final review and commit artifact workflow.
+
+Project-specific memory is separate from chat memory. Use `/memory key=value` to save a project note and `/memory` or `/instructions` to inspect what will be loaded for future orchestrator context.
 
 ### How It Works
 
