@@ -47,6 +47,10 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("diff", m.diffCommandText())
 	case "outputs", "logs":
 		m.setIDEView("outputs", m.outputsCommandText())
+	case "files":
+		m.setIDEView("files", m.filesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "preview":
+		m.setIDEView("preview", m.previewCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "chat":
 		m.mode = modeChat
 		m.status = "chat"
@@ -145,6 +149,8 @@ func slashHelp() string {
 		"/config - show current local configuration summary",
 		"/diff - show current git diff",
 		"/outputs - show recent task events and tool outputs",
+		"/files [query] - fuzzy-find project files",
+		"/preview <path> - preview a project file",
 		"/chat - return to chat transcript",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",

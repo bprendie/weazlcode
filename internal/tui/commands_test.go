@@ -29,7 +29,7 @@ func TestSlashHelpCommand(t *testing.T) {
 	if got.input.Value() != "" {
 		t.Fatalf("input = %q, want empty", got.input.Value())
 	}
-	if !strings.Contains(got.viewport.View(), "/reviewer-input - show frontier-review payload") {
+	if !strings.Contains(got.viewport.View(), "/files [query] - fuzzy-find project files") {
 		t.Fatalf("viewport missing help: %q", got.viewport.View())
 	}
 }
@@ -63,7 +63,7 @@ func TestSlashModelsCommand(t *testing.T) {
 
 func TestSlashDurableIDEViews(t *testing.T) {
 	m := commandTestModel(t)
-	for _, command := range []string{"/tools", "/config", "/outputs"} {
+	for _, command := range []string{"/tools", "/config", "/outputs", "/files"} {
 		updated, _, handled := m.handleSlashCommand(command)
 		if !handled {
 			t.Fatalf("%s handled = false, want true", command)
