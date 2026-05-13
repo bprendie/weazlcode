@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/bprendie/weazlcode/internal/coding"
+	"github.com/bprendie/weazlcode/internal/llm"
 	"github.com/bprendie/weazlcode/internal/lsp"
 	"github.com/bprendie/weazlcode/internal/project"
 )
@@ -191,6 +192,7 @@ func slashHelp() string {
 		"/chat - return to chat transcript",
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
+		"/plan generate <request> - ask orchestrator role for a strict draft plan",
 		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
 		"/packet - show local-worker packet for the first pending task",
@@ -1077,6 +1079,10 @@ func runGitCommit(root, message string) (string, error) {
 }
 
 func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.Cmd, bool) {
+	if len(args) > 0 && strings.ToLower(args[0]) == "generate" {
+		request := strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0]))
+		return m.generatePlanCommand(request)
+	}
 	if len(args) > 0 && strings.ToLower(args[0]) == "draft" {
 		title := strings.TrimSpace(strings.Join(args[1:], " "))
 		if title == "" {
@@ -1145,6 +1151,114 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 	}
 	m.setIDEView("plan", m.planCommandText())
 	return m, nil, true
+}
+
+func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
+	if strings.TrimSpace(request) == "" {
+		m.addSystemNote("Usage: /plan generate <request>")
+		m.status = "plan generate usage"
+		return m, nil, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	raw, err := m.generatePlanJSON(ctx, request)
+	if err != nil {
+		m.addSystemNote("Plan generate error: " + err.Error())
+		m.status = "plan generate failed"
+		return m, nil, true
+	}
+	plan, err := m.planFromGeneratedJSON(raw)
+	if err != nil {
+		m.addSystemNote("Plan generate parse error: " + err.Error() + "\n\nRaw response:\n" + raw)
+		m.status = "plan generate failed"
+		return m, nil, true
+	}
+	if err := m.store.SavePlan(plan); err != nil {
+		m.err = err.Error()
+		m.status = "plan generate failed"
+		return m, nil, true
+	}
+	if saved, ok, err := m.store.LatestPlan(m.session.ID); err == nil && ok {
+		plan = saved
+	}
+	m.addSystemNote(renderPlan(plan))
+	m.status = "plan generated"
+	return m, nil, true
+}
+
+func (m model) generatePlanJSON(ctx context.Context, request string) (string, error) {
+	client := llm.New(m.cfg.ProviderForRole("orchestrator"))
+	return client.Complete(ctx, m.planGenerateMessages(request), 2048)
+}
+
+func (m model) planGenerateMessages(request string) []llm.ChatMessage {
+	instructions, _, _ := project.LoadInstructions(m.project.Root)
+	memories, _ := m.store.ProjectMemories(m.project.Root, 10)
+	commands := project.DiscoverCommands(m.project.Root)
+	var contextText strings.Builder
+	fmt.Fprintf(&contextText, "Project root: %s\n", m.project.Root)
+	if len(m.project.Languages) > 0 {
+		fmt.Fprintf(&contextText, "Languages: %s\n", strings.Join(m.project.Languages, ", "))
+	}
+	if strings.TrimSpace(instructions.Content) != "" {
+		fmt.Fprintf(&contextText, "\nProject instructions:\n%s\n", strings.TrimSpace(instructions.Content))
+	}
+	if len(commands) > 0 {
+		contextText.WriteString("\nDiscovered commands:\n")
+		for _, command := range commands {
+			fmt.Fprintf(&contextText, "- %s\n", command)
+		}
+	}
+	if len(memories) > 0 {
+		contextText.WriteString("\nProject memory:\n")
+		for _, memory := range memories {
+			fmt.Fprintf(&contextText, "- %s: %s\n", memory.Key, memory.Value)
+		}
+	}
+	return []llm.ChatMessage{
+		{
+			Role: "system",
+			Content: strings.Join([]string{
+				"You are the WeazlCode orchestrator.",
+				"Return only valid JSON. Do not wrap it in markdown fences.",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
+				"Prefer verification commands discovered from the project context.",
+			}, "\n"),
+		},
+		{
+			Role:    "user",
+			Content: strings.TrimSpace(contextText.String()) + "\n\nUser request:\n" + strings.TrimSpace(request),
+		},
+	}
+}
+
+func (m model) planFromGeneratedJSON(raw string) (coding.Plan, error) {
+	plan, err := coding.DecodePlanJSON([]byte(extractJSONObject(raw)))
+	if err != nil {
+		return coding.Plan{}, err
+	}
+	plan = coding.PrepareImportedPlan(plan, m.session.ID, m.project.Root, uuid.NewString)
+	if err := coding.ValidatePlan(plan); err != nil {
+		return coding.Plan{}, err
+	}
+	return plan, nil
+}
+
+func extractJSONObject(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "```") {
+		raw = strings.TrimPrefix(raw, "```json")
+		raw = strings.TrimPrefix(raw, "```")
+		raw = strings.TrimSuffix(raw, "```")
+		raw = strings.TrimSpace(raw)
+	}
+	start := strings.Index(raw, "{")
+	end := strings.LastIndex(raw, "}")
+	if start >= 0 && end >= start {
+		return raw[start : end+1]
+	}
+	return raw
 }
 
 func (m model) planCommandText() string {

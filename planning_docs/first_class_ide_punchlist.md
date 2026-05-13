@@ -136,6 +136,8 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add `weazlcode init --force` for controlled regeneration.
 - [x] Run deterministic Stage 1 single-worker loop smoke.
 - [x] Record local model endpoint availability for Stage 1.
+- [x] Add `/plan generate <request>` backed by orchestrator role calls and strict parser validation.
+- [x] Smoke-test `/plan generate` through the TUI with a runtime vLLM-compatible config.
 - [ ] Exercise the single-worker loop against local Ollama/vLLM models.
 - [x] Use frontier planner/reviewer roles on an API-compatible endpoint.
 - [ ] Expand LSP support beyond the current Go-first foundation.
@@ -152,7 +154,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 
 ## Immediate Next Build Order
 
-1. Add `/plan generate <request>` backed by orchestrator role calls and strict parser validation.
+1. Add one-shot repair handling for invalid `/plan generate` JSON.
 2. Exercise the single-worker loop against local Ollama/vLLM models.
 3. Expand LSP support beyond the current Go-first foundation.
 4. Keep parallel workers in Later Extensions until single-worker reliability is proven.

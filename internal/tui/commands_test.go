@@ -136,6 +136,44 @@ func TestSlashPlanDraftCommand(t *testing.T) {
 	}
 }
 
+func TestGeneratedPlanParsing(t *testing.T) {
+	m := commandTestModel(t)
+	raw := "```json\n{\"title\":\"Generated\",\"summary\":\"From model\",\"tasks\":[{\"title\":\"Task\",\"goal\":\"Do work\",\"allowed_paths\":[\"README.md\"],\"verification\":[\"go test ./...\"],\"acceptance_checks\":[{\"description\":\"checks pass\"}]}]}\n```"
+	plan, err := m.planFromGeneratedJSON(raw)
+	if err != nil {
+		t.Fatalf("planFromGeneratedJSON: %v", err)
+	}
+	if plan.Title != "Generated" || plan.Status != coding.PlanStatusDraft || len(plan.Tasks) != 1 || plan.Tasks[0].Status != coding.TaskStatusPending {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "WEAZLCODE.md"), []byte("# Rules\n\nUse small tasks.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.project.Root = root
+	m.project.Languages = []string{"go"}
+	if err := m.store.RememberProject(root, "style", "small patches", "project"); err != nil {
+		t.Fatalf("RememberProject: %v", err)
+	}
+	messages := m.planGenerateMessages("change README")
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"Return only valid JSON", "Use small tasks", "go test ./...", "style: small patches", "change README"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
 func TestSlashPacketCommand(t *testing.T) {
 	m := commandTestModel(t)
 	updated, _, handled := m.handleSlashCommand("/plan draft Add packet")

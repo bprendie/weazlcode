@@ -78,6 +78,20 @@ func (c Client) Stream(ctx context.Context, history []storage.Message, prompt st
 	}
 }
 
+func (c Client) Complete(ctx context.Context, messages []ChatMessage, maxTokens int) (string, error) {
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
+	switch strings.ToLower(c.provider.Type) {
+	case "vllm":
+		return c.completeOpenAICompat(ctx, messages, maxTokens)
+	case "ollama":
+		return c.completeOllama(ctx, messages, maxTokens)
+	default:
+		return "", fmt.Errorf("unsupported provider type %q", c.provider.Type)
+	}
+}
+
 func (c Client) Summarize(ctx context.Context, transcript string, targetTokens int) (string, error) {
 	if targetTokens <= 0 {
 		targetTokens = 500
@@ -92,14 +106,7 @@ func (c Client) Summarize(ctx context.Context, transcript string, targetTokens i
 			Content: fmt.Sprintf("Create a compact checkpoint summary of this conversation in about %d tokens. This summary will replace the earlier messages in context. Use short sections for current objective, decisions/constraints, important files or tool results, and open next steps when applicable.\n\n%s", targetTokens, transcript),
 		},
 	}
-	switch strings.ToLower(c.provider.Type) {
-	case "vllm":
-		return c.completeOpenAICompat(ctx, messages, targetTokens+200)
-	case "ollama":
-		return c.completeOllama(ctx, messages, targetTokens+200)
-	default:
-		return "", fmt.Errorf("unsupported provider type %q", c.provider.Type)
-	}
+	return c.Complete(ctx, messages, targetTokens+200)
 }
 
 func chatMessages(history []storage.Message, prompt string) []ChatMessage {
