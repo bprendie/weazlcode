@@ -528,8 +528,51 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 	if len(patch.Files) > 0 {
 		paths = coding.WorkerFileEditPaths(patch.Files)
 	}
-	if err := coding.ValidatePatchPaths(paths, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
-		m.addSystemNote("Worker patch rejected: " + err.Error())
+	allowedPaths := taskAllowedPaths(task)
+	if err := coding.ValidatePatchPaths(paths, allowedPaths, task.ForbiddenPaths); err != nil {
+		message := formatWorkerPathRejection(paths, allowedPaths, task.ForbiddenPaths, err)
+		payload, _ := json.Marshal(struct {
+			Paths         []string `json:"paths"`
+			AllowedPaths  []string `json:"allowed_paths"`
+			ForbiddenPath []string `json:"forbidden_paths,omitempty"`
+			Error         string   `json:"error"`
+		}{
+			Paths:         paths,
+			AllowedPaths:  allowedPaths,
+			ForbiddenPath: task.ForbiddenPaths,
+			Error:         err.Error(),
+		})
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_rejected",
+			Message: message,
+			Payload: payload,
+		})
+		m.writeRunArtifact("worker_rejected", struct {
+			TaskID        string   `json:"task_id"`
+			Paths         []string `json:"paths"`
+			AllowedPaths  []string `json:"allowed_paths"`
+			ForbiddenPath []string `json:"forbidden_paths,omitempty"`
+			Error         string   `json:"error"`
+		}{TaskID: task.ID, Paths: paths, AllowedPaths: allowedPaths, ForbiddenPath: task.ForbiddenPaths, Error: err.Error()})
+		m.addSystemNote(message)
+		m.status = "worker patch rejected"
+		return m, nil, true
+	}
+	if rewrites := coding.DetectSuspiciousFileRewrites(m.project.Root, patch.Files); len(rewrites) > 0 {
+		message := formatSuspiciousRewriteRejection(rewrites)
+		payload, _ := json.Marshal(rewrites)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_rejected",
+			Message: message,
+			Payload: payload,
+		})
+		m.writeRunArtifact("worker_rejected", struct {
+			TaskID   string                     `json:"task_id"`
+			Rewrites []coding.SuspiciousRewrite `json:"rewrites"`
+		}{TaskID: task.ID, Rewrites: rewrites})
+		m.addSystemNote(message)
 		m.status = "worker patch rejected"
 		return m, nil, true
 	}
@@ -981,10 +1024,43 @@ func taskByID(tasks []coding.Task, id string) (coding.Task, bool) {
 }
 
 func taskAllowedPaths(task coding.Task) []string {
-	if len(task.AllowedPaths) == 0 {
-		return []string{"."}
-	}
 	return task.AllowedPaths
+}
+
+func formatWorkerPathRejection(paths, allowed, forbidden []string, err error) string {
+	var b strings.Builder
+	b.WriteString("Worker patch rejected: returned paths are outside the task scope.")
+	if len(paths) > 0 {
+		fmt.Fprintf(&b, "\nReturned paths:\n%s", bulletList(paths))
+	}
+	if len(allowed) > 0 {
+		fmt.Fprintf(&b, "\nAllowed paths:\n%s", bulletList(allowed))
+	} else {
+		b.WriteString("\nAllowed paths: none")
+	}
+	if len(forbidden) > 0 {
+		fmt.Fprintf(&b, "\nForbidden paths:\n%s", bulletList(forbidden))
+	}
+	if err != nil {
+		fmt.Fprintf(&b, "\nError: %s", err)
+	}
+	return b.String()
+}
+
+func formatSuspiciousRewriteRejection(rewrites []coding.SuspiciousRewrite) string {
+	var b strings.Builder
+	b.WriteString("Worker patch rejected: suspicious full-file rewrite detected.")
+	for _, rewrite := range rewrites {
+		fmt.Fprintf(&b, "\n- %s: %s (%d old lines, %d new lines, %d%% common lines)",
+			rewrite.Path,
+			rewrite.Reason,
+			rewrite.OldLineCount,
+			rewrite.NewLineCount,
+			rewrite.CommonLinePct,
+		)
+	}
+	b.WriteString("\nUse a focused unified diff or a smaller file edit for the requested change.")
+	return b.String()
 }
 
 func (m model) taskVerification(task coding.Task) []string {

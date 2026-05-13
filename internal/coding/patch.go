@@ -15,6 +15,14 @@ type PatchApplyResult struct {
 	Output string   `json:"output"`
 }
 
+type SuspiciousRewrite struct {
+	Path          string `json:"path"`
+	OldLineCount  int    `json:"old_line_count"`
+	NewLineCount  int    `json:"new_line_count"`
+	CommonLinePct int    `json:"common_line_pct"`
+	Reason        string `json:"reason"`
+}
+
 func PatchPaths(patch string) []string {
 	seen := map[string]bool{}
 	var paths []string
@@ -62,7 +70,7 @@ func ValidatePatchPaths(paths, allowed, forbidden []string) error {
 		return fmt.Errorf("allowed path: %w", err)
 	}
 	if len(cleanAllowed) == 0 {
-		cleanAllowed = []string{"."}
+		return fmt.Errorf("allowed paths are required")
 	}
 	cleanForbidden, err := cleanPathSet(forbidden)
 	if err != nil {
@@ -116,6 +124,36 @@ func ApplyFileEdits(projectRoot string, files []WorkerFileEdit) (PatchApplyResul
 	return PatchApplyResult{Paths: paths, Output: "File edits applied."}, nil
 }
 
+func DetectSuspiciousFileRewrites(projectRoot string, files []WorkerFileEdit) []SuspiciousRewrite {
+	var rewrites []SuspiciousRewrite
+	for _, file := range files {
+		path, err := cleanRelativePath(file.Path)
+		if err != nil {
+			continue
+		}
+		oldData, err := os.ReadFile(filepath.Join(projectRoot, path))
+		if err != nil {
+			continue
+		}
+		oldLines := significantLines(string(oldData))
+		if len(oldLines) < 80 {
+			continue
+		}
+		newLines := significantLines(file.Content)
+		commonPct := commonLinePercentage(oldLines, newLines)
+		if len(newLines) < len(oldLines)/2 || commonPct < 25 {
+			rewrites = append(rewrites, SuspiciousRewrite{
+				Path:          path,
+				OldLineCount:  len(oldLines),
+				NewLineCount:  len(newLines),
+				CommonLinePct: commonPct,
+				Reason:        "large existing file was replaced with substantially different full-file content",
+			})
+		}
+	}
+	return rewrites
+}
+
 func ApplyPatch(projectRoot, patch string) (PatchApplyResult, error) {
 	paths := PatchPaths(patch)
 	if len(paths) == 0 {
@@ -139,6 +177,36 @@ func ApplyPatch(projectRoot, patch string) (PatchApplyResult, error) {
 		out = "Patch applied."
 	}
 	return PatchApplyResult{Paths: paths, Output: out}, nil
+}
+
+func significantLines(content string) []string {
+	raw := strings.Split(content, "\n")
+	lines := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func commonLinePercentage(oldLines, newLines []string) int {
+	if len(oldLines) == 0 {
+		return 100
+	}
+	newSet := map[string]int{}
+	for _, line := range newLines {
+		newSet[line]++
+	}
+	common := 0
+	for _, line := range oldLines {
+		if newSet[line] > 0 {
+			common++
+			newSet[line]--
+		}
+	}
+	return common * 100 / len(oldLines)
 }
 
 func cleanPathSet(paths []string) ([]string, error) {

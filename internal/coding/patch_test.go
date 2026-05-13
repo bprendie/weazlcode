@@ -1,6 +1,7 @@
 package coding
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,6 +37,9 @@ func TestValidatePatchPathsAllowedForbidden(t *testing.T) {
 	}
 	if err := ValidatePatchPaths([]string{"internal/secrets/key.txt"}, []string{"internal"}, []string{"internal/secrets"}); err == nil {
 		t.Fatal("ValidatePatchPaths allowed forbidden path")
+	}
+	if err := ValidatePatchPaths([]string{"README.md"}, nil, nil); err == nil {
+		t.Fatal("ValidatePatchPaths allowed missing allowed paths")
 	}
 	if err := ValidatePatchPaths([]string{"../outside.go"}, []string{"."}, nil); err == nil {
 		t.Fatal("ValidatePatchPaths allowed path traversal")
@@ -114,5 +118,26 @@ func TestApplyFileEdits(t *testing.T) {
 	}
 	if _, err := ApplyFileEdits(root, []WorkerFileEdit{{Path: "../outside.md", Content: "bad"}}); err == nil {
 		t.Fatal("ApplyFileEdits allowed path traversal")
+	}
+}
+
+func TestDetectSuspiciousFileRewrites(t *testing.T) {
+	root := t.TempDir()
+	var oldContent string
+	for i := 0; i < 100; i++ {
+		oldContent += fmt.Sprintf("line %03d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "large.md"), []byte(oldContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	rewrites := DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{Path: "large.md", Content: "# replacement\n"}})
+	if len(rewrites) != 1 || rewrites[0].Path != "large.md" {
+		t.Fatalf("rewrites = %#v, want one large.md rewrite", rewrites)
+	}
+
+	rewrites = DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{Path: "large.md", Content: oldContent + "new line\n"}})
+	if len(rewrites) != 0 {
+		t.Fatalf("rewrites = %#v, want none for additive edit", rewrites)
 	}
 }

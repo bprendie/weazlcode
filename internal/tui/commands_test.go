@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -866,6 +867,128 @@ func TestSlashWorkerPatchAppliesFileEditsAndMarksReviewing(t *testing.T) {
 	}
 	if string(data) != "new\n" {
 		t.Fatalf("README = %q, want new", data)
+	}
+}
+
+func TestSlashWorkerPatchRejectsPathsOutsideTaskScope(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker edit","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Wrong file", Files: []coding.WorkerFileEdit{{Path: "docs/README.md", Content: "new\n"}}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch rejected" {
+		t.Fatalf("status = %q, want worker patch rejected", got.status)
+	}
+	if !strings.Contains(got.viewport.View(), "Returned paths:") || !strings.Contains(got.viewport.View(), "Allowed paths:") {
+		t.Fatalf("viewport missing rejection detail: %q", got.viewport.View())
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "worker_rejected" {
+		t.Fatalf("events = %#v", events)
+	}
+	kinds := runArtifactKinds(t, filepath.Join(root, ".weazlcode", "runs", got.session.ID))
+	if !kinds["worker_rejected"] {
+		t.Fatalf("worker_rejected artifact missing from %#v", kinds)
+	}
+}
+
+func TestSlashWorkerPatchRejectsSuspiciousFullFileRewrite(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	var oldContent string
+	for i := 0; i < 100; i++ {
+		oldContent += fmt.Sprintf("line %03d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte(oldContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker edit","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Rewrite", Files: []coding.WorkerFileEdit{{Path: "README.md", Content: "# replacement\n"}}})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch rejected" {
+		t.Fatalf("status = %q, want worker patch rejected", got.status)
+	}
+	if !strings.Contains(got.viewport.View(), "suspicious full-file rewrite") {
+		t.Fatalf("viewport missing rewrite rejection: %q", got.viewport.View())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != oldContent {
+		t.Fatalf("README changed despite rejection")
 	}
 }
 

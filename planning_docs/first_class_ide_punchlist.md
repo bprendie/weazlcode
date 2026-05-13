@@ -188,8 +188,8 @@ Goal: make the single-worker loop harder to misuse by tightening setup validatio
 - [x] Add stricter planner prompt rules for bounded paths, concrete edit goals, and acceptance checks.
 - [x] Add task quality validation before approval for vague goals, missing paths, missing acceptance checks, and broad file scopes.
 - [x] Add `/plan validate` or automatic validation output in the plan/task workflow.
-- [ ] Require worker output to touch only explicit task target paths and surface clearer errors when it does not.
-- [ ] Detect suspicious full-file rewrites for small requested changes.
+- [x] Require worker output to touch only explicit task target paths and surface clearer errors when it does not.
+- [x] Detect suspicious full-file rewrites for small requested changes.
 - [ ] Make reviewer checks compare task goal, allowed paths, diff, verification output, and acceptance checks more mechanically.
 - [ ] Block or flag approvals when a diff is plausible but unrelated to the task.
 - [ ] Store clearer reviewer rationale in task events and run artifacts.
