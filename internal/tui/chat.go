@@ -67,6 +67,8 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.finishRenameWorkspace()
 	case modeClearContext:
 		return m.confirmClearContext()
+	case modeToolApproval:
+		return m.approveToolCalls()
 	case modeChat, modeIDEView:
 		if m.thinking {
 			return m, nil

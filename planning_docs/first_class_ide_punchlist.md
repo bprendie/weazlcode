@@ -92,7 +92,7 @@ Single-worker execution is the right first target. It keeps state, permissions, 
 - [x] Add slash-command mode for local app commands.
 - [x] Add durable view modes: chat, plan, diff, tools, sessions, config.
 - [x] Add diff viewer with file list and hunks.
-- [ ] Add tool-call approval modal.
+- [x] Add tool-call approval modal.
 - [x] Add task progress indicator.
 - [x] Add recent command output panel.
 - [ ] Add fuzzy file picker.

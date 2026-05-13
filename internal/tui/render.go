@@ -30,6 +30,8 @@ func (m model) View() string {
 		body = m.renameWorkspaceView()
 	case modeClearContext:
 		body = m.clearContextView()
+	case modeToolApproval:
+		body = m.toolApprovalView()
 	case modeSessions:
 		body = m.sessions.View()
 	case modeWorkspace:
@@ -70,6 +72,37 @@ func (m model) clearContextView() string {
 		Background(panel).
 		Padding(1, 2).
 		Render(copy))
+}
+
+func (m model) toolApprovalView() string {
+	w := max(20, m.width-6)
+	popupWidth := min(86, max(36, w-4))
+	var b strings.Builder
+	b.WriteString("Approve tool calls\n\n")
+	for i, call := range m.pendingTools {
+		tool, ok := m.toolRegistry.Get(call.Function.Name)
+		safety := "missing"
+		description := "Tool is not registered."
+		if ok {
+			safety = safetyLabel(tool.SafetyLevel())
+			description = tool.Description()
+		}
+		fmt.Fprintf(&b, "%d. %s [%s]\n", i+1, call.Function.Name, safety)
+		if strings.TrimSpace(description) != "" {
+			fmt.Fprintf(&b, "   %s\n", description)
+		}
+		if strings.TrimSpace(call.Function.Arguments) != "" {
+			fmt.Fprintf(&b, "   args: %s\n", oneLine(call.Function.Arguments, popupWidth-12))
+		}
+	}
+	b.WriteString("\n[ enter approve ]   [ esc reject ]")
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, lipgloss.NewStyle().
+		Width(popupWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(crushPink).
+		Background(panel).
+		Padding(1, 2).
+		Render(b.String()))
 }
 
 // renderMessages updates the viewport with the current message history and streaming state
@@ -240,6 +273,9 @@ func (m model) helpText() string {
 	}
 	if m.mode == modeClearContext {
 		return "enter clear context | esc cancel | ctrl+c quit"
+	}
+	if m.mode == modeToolApproval {
+		return "enter approve tools | esc reject tools | ctrl+c quit"
 	}
 	if m.mode == modeSessions {
 		return "enter resume | ctrl+d delete session | esc back | ctrl+c quit"

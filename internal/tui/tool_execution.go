@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/bprendie/weazlcode/internal/llm"
 	"github.com/bprendie/weazlcode/internal/tools"
 )
 
@@ -21,7 +22,19 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 		m.err = err.Error()
 		return m, nil
 	}
+	if len(m.toolApprovalCalls()) > 0 {
+		m.pendingToolInput = inputTokens
+		m.pendingToolOutput = outputTokens
+		m.thinking = false
+		m.mode = modeToolApproval
+		m.status = "approve tool calls"
+		m.renderMessages()
+		return m, nil
+	}
+	return m.runPendingTools(inputTokens, outputTokens, true)
+}
 
+func (m model) runPendingTools(inputTokens, outputTokens int, approved bool) (tea.Model, tea.Cmd) {
 	m.toolResults = make([]string, 0, len(m.pendingTools))
 	for _, call := range m.pendingTools {
 		tool, ok := m.toolRegistry.Get(call.Function.Name)
@@ -35,8 +48,8 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 			continue
 		}
 
-		if !m.cfg.Tools.AutoExecute && tool.SafetyLevel() != tools.SafetyLevelSafe {
-			result := fmt.Sprintf("Tool %q requires manual approval (auto-execute disabled)", call.Function.Name)
+		if !approved {
+			result := fmt.Sprintf("Tool %q rejected by user", call.Function.Name)
 			m.logToolCall(call.ID, call.Function.Name, tool.SafetyLevel(), call.Function.Arguments, "", result, time.Duration(0), false)
 			m.toolResults = append(m.toolResults, result)
 			if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {
@@ -99,8 +112,39 @@ func (m model) executeTools(inputTokens, outputTokens int) (tea.Model, tea.Cmd) 
 	ch := make(chan streamEvent, 64)
 	m.stream = ch
 	m.pendingTools = nil
+	m.pendingToolInput = 0
+	m.pendingToolOutput = 0
 
 	return m, tea.Batch(m.startStream(ch, "", contextHistory), waitStream(ch), m.working.Tick)
+}
+
+func (m model) approveToolCalls() (tea.Model, tea.Cmd) {
+	m.mode = modeChat
+	m.status = "tools approved"
+	m.input.Focus()
+	return m.runPendingTools(m.pendingToolInput, m.pendingToolOutput, true)
+}
+
+func (m model) rejectToolCalls() (tea.Model, tea.Cmd) {
+	m.mode = modeChat
+	m.status = "tools rejected"
+	m.input.Focus()
+	return m.runPendingTools(m.pendingToolInput, m.pendingToolOutput, false)
+}
+
+func (m model) toolApprovalCalls() []llm.ToolCall {
+	if m.cfg.Tools.AutoExecute {
+		return nil
+	}
+	var calls []llm.ToolCall
+	for _, call := range m.pendingTools {
+		tool, ok := m.toolRegistry.Get(call.Function.Name)
+		if !ok || tool.SafetyLevel() == tools.SafetyLevelSafe {
+			continue
+		}
+		calls = append(calls, call)
+	}
+	return calls
 }
 
 type toolCallLog struct {

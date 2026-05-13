@@ -32,6 +32,7 @@ const (
 	modeWorkspace
 	modeRenameWorkspace
 	modeClearContext
+	modeToolApproval
 )
 
 type model struct {
@@ -77,6 +78,8 @@ type model struct {
 	historyDraft        string
 	pendingTools        []llm.ToolCall
 	toolResults         []string
+	pendingToolInput    int
+	pendingToolOutput   int
 }
 
 type streamEvent struct {
@@ -235,6 +238,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "esc":
+			if m.mode == modeToolApproval {
+				return m.rejectToolCalls()
+			}
 			if m.mode == modeSessions || m.mode == modeWorkspace || m.mode == modeIDEView {
 				m.mode = modeChat
 				m.input.Focus()
