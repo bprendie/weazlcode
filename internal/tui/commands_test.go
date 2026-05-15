@@ -1286,6 +1286,25 @@ func TestSlashReviewerInputCommand(t *testing.T) {
 	}
 }
 
+func TestReviewerInputScopesDiffToCurrentTask(t *testing.T) {
+	m, root := commandTestModelWithReviewingTask(t)
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("old other\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile other: %v", err)
+	}
+	runTestGit(t, root, "add", "other.txt")
+	runTestGit(t, root, "commit", "-m", "add other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("new other\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile other changed: %v", err)
+	}
+	input, err := m.buildReviewerInput()
+	if err != nil {
+		t.Fatalf("buildReviewerInput: %v", err)
+	}
+	if !strings.Contains(input.Diff, "README.md") || strings.Contains(input.Diff, "other.txt") {
+		t.Fatalf("reviewer diff was not task scoped:\n%s", input.Diff)
+	}
+}
+
 func TestReviewerVerdictMessages(t *testing.T) {
 	input := coding.ReviewerInput{
 		TaskPacket: coding.TaskPacket{TaskID: "task-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}},
@@ -1492,6 +1511,26 @@ func TestReviewApproveBlockedByLocalGuardrail(t *testing.T) {
 	}
 	if events[len(events)-1].Type != "review_guardrail" {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestReviewApproveIgnoresDiffOutsideCurrentTaskScope(t *testing.T) {
+	m, root := commandTestModelWithReviewingTask(t)
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("old other\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile other: %v", err)
+	}
+	runTestGit(t, root, "add", "other.txt")
+	runTestGit(t, root, "commit", "-m", "add other")
+	if err := os.WriteFile(filepath.Join(root, "other.txt"), []byte("new other\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile other changed: %v", err)
+	}
+	updated, _, handled := m.handleSlashCommand("/review approve Looks good")
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task done" {
+		t.Fatalf("status = %q, want task done\n%s", got.status, got.viewport.View())
 	}
 }
 

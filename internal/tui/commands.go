@@ -1347,7 +1347,7 @@ func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
-	diff, err := m.gitDiff()
+	diff, err := m.taskGitDiff(task)
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
@@ -1578,7 +1578,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 
 func (m model) reviewApprovalIssues(task coding.Task) []string {
 	var issues []string
-	diff, err := m.gitDiff()
+	diff, err := m.taskGitDiff(task)
 	if err != nil {
 		issues = append(issues, "could not read git diff: "+err.Error())
 	} else {
@@ -1669,6 +1669,33 @@ func (m model) gitDiff() (string, error) {
 		return "", fmt.Errorf("git_diff tool is not registered")
 	}
 	return tool.Execute(context.Background(), map[string]any{"cwd": m.project.Root})
+}
+
+func (m model) taskGitDiff(task coding.Task) (string, error) {
+	allowed := taskAllowedPaths(task)
+	if len(allowed) == 0 {
+		return "", fmt.Errorf("task has no allowed paths")
+	}
+	tool, ok := m.toolRegistry.Get("git_diff")
+	if !ok {
+		return "", fmt.Errorf("git_diff tool is not registered")
+	}
+	var parts []string
+	for _, path := range allowed {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		diff, err := tool.Execute(context.Background(), map[string]any{"cwd": m.project.Root, "path": path})
+		if err != nil {
+			return "", err
+		}
+		diff = strings.TrimSpace(diff)
+		if diff != "" {
+			parts = append(parts, diff)
+		}
+	}
+	return strings.Join(parts, "\n\n"), nil
 }
 
 func (m model) changedFiles() (string, error) {

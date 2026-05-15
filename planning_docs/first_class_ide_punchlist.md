@@ -221,7 +221,7 @@ Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditab
 - [x] Add reviewer queue support for completed worker tasks.
 - [x] Add TUI progress for multiple running/reviewing tasks.
 - [x] Add cancellation for one task or all active worker runs.
-- [ ] Smoke-test parallel dispatch against a vLLM-compatible endpoint.
+- [x] Smoke-test parallel dispatch against a vLLM-compatible endpoint.
 
 ## Later Extensions
 
@@ -233,6 +233,5 @@ Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditab
 
 ## Immediate Next Build Order
 
-1. Run a live Phase 6 `/run-workers` smoke against a vLLM-compatible endpoint.
-2. Tune task scheduling and progress display from real multi-task repo runs.
-3. Start the next phase after parallel worker reliability is smoke-tested.
+1. Tune task scheduling and progress display from real multi-task repo runs.
+2. Start the next phase after parallel worker reliability is smoke-tested.

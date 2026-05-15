@@ -29,7 +29,8 @@ Use vLLM/Ollama server parallelism while preserving bounded tasks, per-task arti
 - Tasks with overlapping allowed paths are serialized.
 - Tasks with unmet dependencies are skipped.
 - Unknown or empty allowed-path tasks are not selected for parallel execution unless manually run through the existing single-task path.
-- Worker patch validation and reviewer guardrails are unchanged.
+- Worker patch validation remains per task.
+- Reviewer input and approval guardrails use the current task's allowed paths, so queued parallel diffs from other tasks do not block an otherwise valid review.
 
 ## Smoke Criteria
 
@@ -57,4 +58,20 @@ Result: dispatch path passed; provider completion blocked by endpoint health.
 - A direct `/v1/models` health check against the same runtime endpoint also returned `502 Bad Gateway`.
 - After this smoke, worker model errors were tightened to move the affected task to `blocked` instead of leaving it `running`.
 
-The remaining unchecked Phase 6 item is a successful live worker completion/review pass once the runtime endpoint is healthy.
+## Runtime Smoke Rerun
+
+Runtime endpoint configuration stayed outside the repository.
+
+Result: full parallel worker and reviewer queue smoke passed.
+
+- Created a disposable git repo with two independent files.
+- Imported an approved two-task plan with non-overlapping allowed paths.
+- Ran `/run-workers` with concurrency `2`.
+- Both tasks moved to `reviewing` after concurrent worker model calls.
+- Each task wrote its own `parallel_worker_start`, `worker_model`, and `worker_patch` events.
+- Both workers edited only their allowed file.
+- The first reviewer rerun exposed a task-scoping bug: local approval guardrails inspected the whole repo diff, so the first task was blocked by the second task's unrelated concurrent diff.
+- Reviewer input and local approval guardrails now use a task-scoped git diff assembled from the current task's `allowed_paths`.
+- Reran the live smoke against the same style of runtime-only vLLM-compatible config.
+- `/run-reviewer` approved the first queued task, then approved the second queued task.
+- Both tasks and the plan reached `done`.
