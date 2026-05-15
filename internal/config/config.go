@@ -61,7 +61,8 @@ type Skills struct {
 }
 
 type Workers struct {
-	Concurrency int `json:"concurrency"`
+	Concurrency           int `json:"concurrency"`
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -146,7 +147,8 @@ func Default() Config {
 			Paths:   defaultSkillPaths(),
 		},
 		Workers: Workers{
-			Concurrency: 2,
+			Concurrency:           2,
+			RequestTimeoutSeconds: 300,
 		},
 	}
 }
@@ -211,6 +213,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.Workers.Concurrency <= 0 {
 		c.Workers.Concurrency = def.Workers.Concurrency
+	}
+	if c.Workers.RequestTimeoutSeconds <= 0 {
+		c.Workers.RequestTimeoutSeconds = def.Workers.RequestTimeoutSeconds
 	}
 }
 

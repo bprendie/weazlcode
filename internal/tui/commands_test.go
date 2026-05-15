@@ -140,6 +140,19 @@ func TestReadOnlyChatDoesNotAutoRouteToPlanGenerate(t *testing.T) {
 	}
 }
 
+func TestOrchestratorPromptIncludesWorkerCapacity(t *testing.T) {
+	m := commandTestModel(t)
+	worker := m.cfg.Providers[m.cfg.ModelRoles.Worker]
+	worker.Model = "granite-8b"
+	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
+	prompt := m.orchestratorPrompt("how should we split this work?")
+	for _, want := range []string{"WeazlCode execution model:", "granite-8b", "small 8.0B-class local worker", "bounded local worker tasks"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestSlashDurableIDEViews(t *testing.T) {
 	m := commandTestModel(t)
 	for _, command := range []string{"/tools", "/skills", "/config", "/outputs", "/files"} {
@@ -324,7 +337,7 @@ func TestGeneratedPlanRepairPrompt(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", "Do not add unknown fields", "Parser error", raw, "change README"} {
+	for _, want := range []string{"Return only valid JSON", "Do not add unknown fields", "Configured worker:", "capacity:", "Parser error", raw, "change README"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("repair messages missing %q:\n%s", want, combined)
 		}
@@ -358,6 +371,9 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 	m.project.Root = root
 	m.project.Languages = []string{"go"}
 	m.cfg.Skills.Paths = []string{".weazlcode/skills"}
+	worker := m.cfg.Providers[m.cfg.ModelRoles.Worker]
+	worker.Model = "granite-4.1-8b-awq"
+	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
 	if err := m.store.RememberProject(root, "style", "small patches", "project"); err != nil {
 		t.Fatalf("RememberProject: %v", err)
 	}
@@ -366,10 +382,27 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", `"skills"`, "Use small tasks", "go test ./...", "style: small patches", "go-tests", "Write focused Go tests.", "change README"} {
+	for _, want := range []string{"Return only valid JSON", `"skills"`, "Use small tasks", "go test ./...", "Configured worker:", "small 8.0B-class local worker", "style: small patches", "go-tests", "Write focused Go tests.", "change README"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("messages missing %q:\n%s", want, combined)
 		}
+	}
+}
+
+func TestWorkerCapacityProfileInfersModelSize(t *testing.T) {
+	m := commandTestModel(t)
+	worker := m.cfg.Providers[m.cfg.ModelRoles.Worker]
+	worker.Model = "cyankiwi/granite-4.1-8b-AWQ-INT4"
+	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
+	profile := m.workerCapacityProfile()
+	if profile.SizeBillions != 8 || !strings.Contains(profile.Instruction, "tiny") {
+		t.Fatalf("profile = %#v", profile)
+	}
+	worker.Model = "unknown-local-model"
+	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
+	profile = m.workerCapacityProfile()
+	if profile.SizeBillions != 0 || !strings.Contains(profile.Label, "unknown-size") {
+		t.Fatalf("unknown profile = %#v", profile)
 	}
 }
 

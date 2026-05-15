@@ -3,6 +3,8 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"strconv"
+	"strings"
 
 	"github.com/bprendie/weazlcode/internal/coding"
 )
@@ -33,6 +35,9 @@ func (s *Store) SavePlan(plan coding.Plan) error {
 	if _, err := tx.Exec(`delete from tasks where plan_id = ?`, plan.ID); err != nil {
 		return err
 	}
+	if err := qualifyCollidingTaskIDs(tx, &plan); err != nil {
+		return err
+	}
 	for _, task := range plan.Tasks {
 		if task.PlanID == "" {
 			task.PlanID = plan.ID
@@ -42,6 +47,69 @@ func (s *Store) SavePlan(plan coding.Plan) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func qualifyCollidingTaskIDs(tx *sql.Tx, plan *coding.Plan) error {
+	renames := map[string]string{}
+	for i := range plan.Tasks {
+		taskID := strings.TrimSpace(plan.Tasks[i].ID)
+		if taskID == "" {
+			continue
+		}
+		var existingPlanID string
+		err := tx.QueryRow(`select plan_id from tasks where id = ? limit 1`, taskID).Scan(&existingPlanID)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if existingPlanID == plan.ID {
+			continue
+		}
+		nextID, err := uniqueTaskID(tx, plan.ID, taskID)
+		if err != nil {
+			return err
+		}
+		renames[taskID] = nextID
+		plan.Tasks[i].ID = nextID
+	}
+	if len(renames) == 0 {
+		return nil
+	}
+	for i := range plan.Tasks {
+		for j, dep := range plan.Tasks[i].DependsOn {
+			if renamed, ok := renames[strings.TrimSpace(dep)]; ok {
+				plan.Tasks[i].DependsOn[j] = renamed
+			}
+		}
+	}
+	return nil
+}
+
+func uniqueTaskID(tx *sql.Tx, planID, taskID string) (string, error) {
+	suffix := taskIDSuffix(planID)
+	candidate := taskID + "-" + suffix
+	for n := 2; ; n++ {
+		var exists int
+		if err := tx.QueryRow(`select 1 from tasks where id = ? limit 1`, candidate).Scan(&exists); err == sql.ErrNoRows {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+		candidate = taskID + "-" + suffix + "-" + strconv.Itoa(n)
+	}
+}
+
+func taskIDSuffix(planID string) string {
+	clean := strings.NewReplacer("-", "", "_", "").Replace(strings.TrimSpace(planID))
+	if len(clean) > 8 {
+		return clean[:8]
+	}
+	if clean != "" {
+		return clean
+	}
+	return "plan"
 }
 
 func (s *Store) LatestPlan(sessionID string) (coding.Plan, bool, error) {

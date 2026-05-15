@@ -10,7 +10,7 @@ WeazlCode is a sovereign, local-first AI coding TUI that splits the brain to sav
 
 ## Current Status: The Split-Brain Loop
 
-WeazlCode has moved beyond simple chat. Phase 1 through 4 of the IDE architecture are implemented, smoke-tested, and live:
+WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architecture are implemented, smoke-tested, and live:
 
 - Project-Aware Metal: Git root detection, local `.weazlcode/` state, project summaries, and isolated tool logs.
 - The Grindage Loop: Bounded task packets, structured `WorkerPatch` output, unified diffs, path validation, and capped repair loops.
@@ -19,7 +19,8 @@ WeazlCode has moved beyond simple chat. Phase 1 through 4 of the IDE architectur
 - LSP Foundation: Go-first language server support with diagnostics, symbols, and definitions fed directly into task packets.
 - Async TUI: Command palettes, diff views, and diagnostics. Async plan/worker/reviewer spinners keep the IDE view alive while long-running models grind in the background.
 - Skills Surface: Project and global `SKILL.md` discovery, `/skills` inspection, planner skill selection, and explicit task-level skill attachment.
-- Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, and per-task worker cancellation.
+- Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, per-task worker cancellation, and configurable worker request timeouts.
+- Review Loops: Claude/OpenAI-class reviewers can inspect task-scoped evidence, request focused repairs, and send only bounded repair packets back to the local worker.
 
 ## Defaults
 
@@ -28,8 +29,12 @@ On first launch, WeazlCode drops a fresh `config.json` into `~/.config/weazlcode
 - `local-vllm`: `http://localhost:8000`
 - model: `local-model`
 - `local-ollama`: `http://localhost:11434`
+- `workers.concurrency`: `2`
+- `workers.request_timeout_seconds`: `300`
 
 Because hardcoding endpoints into a coding tool is how tiny annoyances become permanent roommates, WeazlCode reads your endpoints and models from the config at runtime.
+
+WeazlCode also infers a worker capacity profile from the configured worker model name. A model like `granite-8b`, `llama3.1:8b`, or any other `8b`-style name automatically nudges the planner toward tiny, narrow, 8B-friendly task packets without making you repeat that constraint in every prompt.
 
 ## Grab The Source
 

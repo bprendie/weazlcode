@@ -149,6 +149,14 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 
 func (m model) orchestratorPrompt(prompt string) string {
 	var sections []string
+	worker := m.cfg.ProviderForRole("worker")
+	profile := m.workerCapacityProfile()
+	sections = append(sections, fmt.Sprintf("WeazlCode execution model:\n- Planning/review runs through the orchestrator/reviewer roles.\n- Code changes should be broken into bounded local worker tasks when implementation is requested.\n- Configured worker: %s/%s (%s).\n- Worker constraint: %s",
+		worker.Type,
+		worker.Model,
+		profile.Label,
+		profile.Instruction,
+	))
 	if instructions, ok, err := project.LoadInstructions(m.project.Root); err == nil && ok && strings.TrimSpace(instructions.Content) != "" {
 		sections = append(sections, "Project instructions from "+project.PrimaryInstructionsFile+":\n"+strings.TrimSpace(instructions.Content))
 	}
@@ -159,9 +167,6 @@ func (m model) orchestratorPrompt(prompt string) string {
 			fmt.Fprintf(&b, "\n- %s: %s", memory.Key, memory.Value)
 		}
 		sections = append(sections, b.String())
-	}
-	if len(sections) == 0 {
-		return prompt
 	}
 	return strings.Join(sections, "\n\n") + "\n\nUser request:\n" + prompt
 }

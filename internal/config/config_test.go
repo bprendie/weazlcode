@@ -16,6 +16,9 @@ func TestDefaultModelRoles(t *testing.T) {
 	if cfg.Workers.Concurrency != 2 {
 		t.Fatalf("Workers.Concurrency = %d, want 2", cfg.Workers.Concurrency)
 	}
+	if cfg.Workers.RequestTimeoutSeconds != 300 {
+		t.Fatalf("Workers.RequestTimeoutSeconds = %d, want 300", cfg.Workers.RequestTimeoutSeconds)
+	}
 }
 
 func TestModelRolesDefaultToActiveProvider(t *testing.T) {
@@ -34,6 +37,9 @@ func TestModelRolesDefaultToActiveProvider(t *testing.T) {
 	}
 	if cfg.Workers.Concurrency != 2 {
 		t.Fatalf("Workers.Concurrency = %d, want 2", cfg.Workers.Concurrency)
+	}
+	if cfg.Workers.RequestTimeoutSeconds != 300 {
+		t.Fatalf("Workers.RequestTimeoutSeconds = %d, want 300", cfg.Workers.RequestTimeoutSeconds)
 	}
 }
 

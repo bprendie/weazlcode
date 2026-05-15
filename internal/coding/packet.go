@@ -16,6 +16,7 @@ type TaskPacket struct {
 	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
 	ContextFiles     []ContextFile     `json:"context_files,omitempty"`
 	Skills           []SkillContext    `json:"skills,omitempty"`
+	WorkerProfile    string            `json:"worker_profile,omitempty"`
 	ContextPolicy    ContextPolicy     `json:"context_policy"`
 	Diagnostics      []Diagnostic      `json:"diagnostics,omitempty"`
 	ToolsAllowed     []string          `json:"tools_allowed"`

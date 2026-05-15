@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,8 @@ const maxRepairAttempts = 2
 const maxWorkerPatchDiffRepairAttempts = 2
 const maxPlanGenerateTokens = 8192
 const maxTaskBaselineBytes = 2 * 1024 * 1024
+
+var modelSizePattern = regexp.MustCompile(`(?i)(?:^|[^0-9])([0-9]+(?:\.[0-9]+)?)\s*b(?:[^a-z]|$)`)
 
 type taskBaselinePayload struct {
 	Files     []taskBaselineFile `json:"files"`
@@ -573,7 +576,7 @@ func (m model) runParallelWorkers() (tea.Model, tea.Cmd, bool) {
 			Payload: payload,
 		})
 		m.writeRunArtifact("worker_packet_"+task.ID, packet)
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), m.workerRequestTimeout())
 		m.modelRunID++
 		runID := m.modelRunID
 		m.ensureWorkerRunMaps()
@@ -718,7 +721,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 	if err != nil {
 		applyErrors = append(applyErrors, err)
 		if len(patch.Files) == 0 && repairInvalidDiff && repairAttempts < maxWorkerPatchDiffRepairAttempts {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), m.workerRequestTimeout())
 			defer cancel()
 			repaired, repairErr := m.repairWorkerPatchDiff(ctx, task, patch, err)
 			if repairErr == nil {
@@ -844,7 +847,7 @@ func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
 	m.working.Spinner = spinner.Jump
 	m.status = "running worker"
 	m.streamAt = time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), m.workerRequestTimeout())
 	m.modelRunID++
 	runID := m.modelRunID
 	m.ensureWorkerRunMaps()
@@ -899,6 +902,63 @@ func (m model) workerConcurrency() int {
 		return 1
 	}
 	return m.cfg.Workers.Concurrency
+}
+
+func (m model) workerRequestTimeout() time.Duration {
+	seconds := m.cfg.Workers.RequestTimeoutSeconds
+	if seconds <= 0 {
+		seconds = 300
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+type workerCapacityProfile struct {
+	Label        string
+	SizeBillions float64
+	Instruction  string
+}
+
+func (m model) workerCapacityProfile() workerCapacityProfile {
+	worker := m.cfg.ProviderForRole("worker")
+	modelName := strings.TrimSpace(worker.Model)
+	size := inferModelSizeBillions(modelName)
+	switch {
+	case size > 0 && size <= 10:
+		return workerCapacityProfile{
+			Label:        fmt.Sprintf("small %.1fB-class local worker", size),
+			SizeBillions: size,
+			Instruction:  "Assume the worker has limited reasoning and output budget. Split work into tiny, concrete tasks with narrow allowed_paths, minimal context_files, and single-purpose acceptance checks. Prefer create-only module tasks plus a later wiring task for shared files.",
+		}
+	case size > 0 && size <= 16:
+		return workerCapacityProfile{
+			Label:        fmt.Sprintf("mid %.1fB-class local worker", size),
+			SizeBillions: size,
+			Instruction:  "Keep worker tasks compact and bounded. Avoid broad rewrites, keep allowed_paths narrow, and separate planning/design choices from implementation tasks.",
+		}
+	case size > 0:
+		return workerCapacityProfile{
+			Label:        fmt.Sprintf("large %.1fB-class local worker", size),
+			SizeBillions: size,
+			Instruction:  "The worker can handle larger packets than small local models, but tasks must still be bounded, reviewable, and constrained to explicit paths.",
+		}
+	default:
+		return workerCapacityProfile{
+			Label:       "unknown-size local worker",
+			Instruction: "Worker size could not be inferred from the configured model name. Plan conservatively as if the worker is small: narrow files, small patches, explicit acceptance checks, and no broad rewrites.",
+		}
+	}
+}
+
+func inferModelSizeBillions(modelName string) float64 {
+	match := modelSizePattern.FindStringSubmatch(modelName)
+	if len(match) != 2 {
+		return 0
+	}
+	size, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return 0
+	}
+	return size
 }
 
 func (m model) providerNameForRole(role string) string {
@@ -976,11 +1036,13 @@ func formatWorkerPatchApplyFailure(applyErrors []error, repairErr error) string 
 }
 
 func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
+	profile := workerCapacityProfileForPacket(packet)
 	return []llm.ChatMessage{
 		{
 			Role: "system",
 			Content: strings.Join([]string{
 				"You are the WeazlCode local worker.",
+				profile,
 				"Return a WorkerPatch JSON object.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
@@ -997,6 +1059,16 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 			Content: "Task packet:\n" + renderJSON(packet),
 		},
 	}
+}
+
+func workerCapacityProfileForPacket(packet coding.TaskPacket) string {
+	if strings.TrimSpace(packet.WorkerProfile) != "" {
+		return packet.WorkerProfile
+	}
+	if strings.Contains(strings.ToLower(packet.Goal), "repair focus:") {
+		return "This is a constrained repair pass. Make the smallest possible focused change."
+	}
+	return "Assume you are a local coding worker with limited reasoning and output budget. Complete only this bounded task, keep changes small, and return blocker if the packet is too broad or missing context."
 }
 
 func workerPatchDiffRepairMessages(packet coding.TaskPacket, patch coding.WorkerPatch, applyErr error) []llm.ChatMessage {
@@ -1094,7 +1166,7 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	if err != nil {
 		return coding.TaskPacket{}, err
 	}
-	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
+	packet, err := coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
 		DefaultAllowed: []string{
 			".",
@@ -1104,6 +1176,12 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 		Diagnostics:   diagnostics,
 		Skills:        skills,
 	})
+	if err != nil {
+		return coding.TaskPacket{}, err
+	}
+	profile := m.workerCapacityProfile()
+	packet.WorkerProfile = profile.Label + ": " + profile.Instruction
+	return packet, nil
 }
 
 func (m model) skillContexts(names []string) ([]coding.SkillContext, error) {
@@ -2899,6 +2977,15 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 	if len(m.project.Languages) > 0 {
 		fmt.Fprintf(&contextText, "Languages: %s\n", strings.Join(m.project.Languages, ", "))
 	}
+	worker := m.cfg.ProviderForRole("worker")
+	workerProfile := m.workerCapacityProfile()
+	fmt.Fprintf(&contextText, "\nConfigured worker:\nprovider: %s\nmodel: %s/%s\ncapacity: %s\nplanning constraint: %s\n",
+		m.providerNameForRole("worker"),
+		worker.Type,
+		worker.Model,
+		workerProfile.Label,
+		workerProfile.Instruction,
+	)
 	if strings.TrimSpace(instructions.Content) != "" {
 		fmt.Fprintf(&contextText, "\nProject instructions:\n%s\n", strings.TrimSpace(instructions.Content))
 	}
@@ -2941,8 +3028,9 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Every task must include a stable unique id such as task-1, task-2, task-3. depends_on must reference those exact ids only.",
-				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
+				"Every task must be small enough for the configured local worker capacity and must include explicit allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
+				"When decomposing large files, prefer tasks that create new modules/files without editing shared source files; add a later wiring task for shared files so independent work can run in parallel.",
 				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
 				"Every task must include concrete acceptance_checks that can be reviewed against the diff.",
 				"If a discovered skill is directly relevant, include its exact skill name in the task skills array. Otherwise leave skills empty.",
@@ -2989,6 +3077,8 @@ func (m model) planReferencedFilePreviews(request string) string {
 }
 
 func (m model) planRepairMessages(request, raw string, parseErr error) []llm.ChatMessage {
+	worker := m.cfg.ProviderForRole("worker")
+	workerProfile := m.workerCapacityProfile()
 	return []llm.ChatMessage{
 		{
 			Role: "system",
@@ -2997,13 +3087,18 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include id, title, goal, and allowed_paths. depends_on must reference exact task ids in the same plan.",
-				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for one bounded worker task.",
+				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for the configured local worker capacity.",
+				workerProfile.Instruction,
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
 			}, "\n"),
 		},
 		{
 			Role: "user",
-			Content: fmt.Sprintf("User request:\n%s\n\nParser error:\n%s\n\nRaw response to repair:\n%s",
+			Content: fmt.Sprintf("Configured worker:\nprovider: %s\nmodel: %s/%s\ncapacity: %s\n\nUser request:\n%s\n\nParser error:\n%s\n\nRaw response to repair:\n%s",
+				m.providerNameForRole("worker"),
+				worker.Type,
+				worker.Model,
+				workerProfile.Label,
 				strings.TrimSpace(request),
 				parseErr,
 				strings.TrimSpace(raw),
@@ -3308,7 +3403,8 @@ func (m model) configViewText() string {
 	fmt.Fprintf(&b, "- summarizer: %s\n", m.cfg.ModelRoles.Summarizer)
 	fmt.Fprintf(&b, "\nTools:\nenabled: %t\nauto_execute_safe: %t\nmax_output_chars: %d\nmax_file_bytes: %d\n", m.cfg.Tools.Enabled, m.cfg.Tools.AutoExecute, m.cfg.Tools.MaxOutputChars, m.cfg.Tools.MaxFileBytes)
 	fmt.Fprintf(&b, "\nSkills:\nenabled: %t\npaths: %s\n", m.cfg.Skills.SkillsEnabled(), strings.Join(m.cfg.Skills.Paths, ", "))
-	fmt.Fprintf(&b, "\nWorkers:\nconcurrency: %d\n", m.workerConcurrency())
+	workerProfile := m.workerCapacityProfile()
+	fmt.Fprintf(&b, "\nWorkers:\nconcurrency: %d\nrequest_timeout_seconds: %d\ncapacity: %s\n", m.workerConcurrency(), int(m.workerRequestTimeout().Seconds()), workerProfile.Label)
 	return strings.TrimRight(b.String(), "\n")
 }
 

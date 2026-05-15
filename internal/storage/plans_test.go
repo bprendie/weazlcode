@@ -102,6 +102,68 @@ func TestTaskEventsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSavePlanQualifiesTaskIDsThatCollideAcrossPlans(t *testing.T) {
+	store := testPlanStore(t)
+	if err := store.CreateSession("s1", "title", "provider", "model"); err != nil {
+		t.Fatalf("CreateSession s1: %v", err)
+	}
+	if err := store.CreateSession("s2", "title", "provider", "model"); err != nil {
+		t.Fatalf("CreateSession s2: %v", err)
+	}
+	first := coding.Plan{
+		ID:        "plan-one",
+		SessionID: "s1",
+		Title:     "Plan one",
+		Status:    coding.PlanStatusDraft,
+		Tasks: []coding.Task{{
+			ID:     "task-1",
+			PlanID: "plan-one",
+			Title:  "Task",
+			Goal:   "Do work",
+			Status: coding.TaskStatusPending,
+		}},
+	}
+	if err := store.SavePlan(first); err != nil {
+		t.Fatalf("SavePlan first: %v", err)
+	}
+	second := coding.Plan{
+		ID:        "plan-two",
+		SessionID: "s2",
+		Title:     "Plan two",
+		Status:    coding.PlanStatusDraft,
+		Tasks: []coding.Task{
+			{
+				ID:     "task-1",
+				PlanID: "plan-two",
+				Title:  "Task one",
+				Goal:   "Do one",
+				Status: coding.TaskStatusPending,
+			},
+			{
+				ID:        "task-2",
+				PlanID:    "plan-two",
+				Title:     "Task two",
+				Goal:      "Do two",
+				Status:    coding.TaskStatusPending,
+				DependsOn: []string{"task-1"},
+			},
+		},
+	}
+	if err := store.SavePlan(second); err != nil {
+		t.Fatalf("SavePlan second: %v", err)
+	}
+	got, ok, err := store.LatestPlan("s2")
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan s2: %v ok=%v", err, ok)
+	}
+	if got.Tasks[0].ID == "task-1" {
+		t.Fatalf("colliding task id was not qualified: %#v", got.Tasks)
+	}
+	if got.Tasks[1].DependsOn[0] != got.Tasks[0].ID {
+		t.Fatalf("dependency was not rewritten: %#v", got.Tasks)
+	}
+}
+
 func TestPlanAndTaskStatusUpdates(t *testing.T) {
 	store := testPlanStore(t)
 	if err := store.CreateSession("s1", "title", "provider", "model"); err != nil {
