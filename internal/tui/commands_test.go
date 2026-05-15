@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -96,6 +97,45 @@ func TestModelProviderBarShowsSplitBrainProviders(t *testing.T) {
 	for _, want := range []string{"plan:anthropic/claude-test", "worker:ollama/llama3.1", "review:anthropic/claude-test"} {
 		if !strings.Contains(bar, want) {
 			t.Fatalf("bar missing %q: %s", want, bar)
+		}
+	}
+}
+
+func TestThinkingViewShowsProcessingModel(t *testing.T) {
+	m := commandTestModel()
+	m.cfg.Providers["planning-llm"] = config.Provider{Type: "anthropic", Model: "claude-test"}
+	m.cfg.ModelRoles.Orchestrator = "planning-llm"
+	m.thinking = true
+	m.status = "streaming orchestrator"
+	m.streamAt = time.Now()
+	view := m.thinkingView()
+	if !strings.Contains(view, "[orchestrator:anthropic/claude-test]") {
+		t.Fatalf("thinking view missing processing model: %q", view)
+	}
+}
+
+func TestCodeChangeChatAutoRoutesToPlanGenerate(t *testing.T) {
+	m := commandTestModel(t)
+	m.input.SetValue("implement a settings page")
+	updated, cmd := m.handleEnter()
+	got := updated.(model)
+	if cmd == nil || !got.thinking || got.status != "generating plan" {
+		t.Fatalf("state = cmd:%v thinking:%t status:%q", cmd, got.thinking, got.status)
+	}
+	if strings.TrimSpace(got.input.Value()) != "" {
+		t.Fatalf("input was not cleared: %q", got.input.Value())
+	}
+}
+
+func TestReadOnlyChatDoesNotAutoRouteToPlanGenerate(t *testing.T) {
+	for _, prompt := range []string{"look at ../weazl.world and summarize it", "explain how routing works"} {
+		if shouldAutoGeneratePlan(prompt) {
+			t.Fatalf("prompt should stay chat: %q", prompt)
+		}
+	}
+	for _, prompt := range []string{"fix the routing bug", "write code for a settings page", "look at the repo and fix the failing test"} {
+		if !shouldAutoGeneratePlan(prompt) {
+			t.Fatalf("prompt should route to plan: %q", prompt)
 		}
 	}
 }

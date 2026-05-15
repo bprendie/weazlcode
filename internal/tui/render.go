@@ -225,9 +225,32 @@ func (m model) getToolNames() []string {
 // thinkingView returns the spinner view with appropriate status text
 func (m model) thinkingView() string {
 	if m.trimming {
-		return fmt.Sprintf("%s compacting_context_checkpoint", m.working.View())
+		return fmt.Sprintf("%s %s compacting_context_checkpoint", m.working.View(), m.processingModelLabel("summarizer"))
 	}
-	return fmt.Sprintf("%s %s", m.working.View(), m.thinkingPhrase())
+	return fmt.Sprintf("%s %s %s", m.working.View(), m.processingModelLabel(m.processingRole()), m.thinkingPhrase())
+}
+
+func (m model) processingRole() string {
+	status := strings.ToLower(m.status)
+	switch {
+	case strings.Contains(status, "worker"):
+		return "worker"
+	case strings.Contains(status, "reviewer"):
+		return "reviewer"
+	case strings.Contains(status, "plan"), strings.Contains(status, "orchestrator"):
+		return "orchestrator"
+	default:
+		return "orchestrator"
+	}
+}
+
+func (m model) processingModelLabel(role string) string {
+	p := m.cfg.ProviderForRole(role)
+	name := m.providerNameForRole(role)
+	if p.Type == "" && p.Model == "" {
+		return fmt.Sprintf("[%s:%s missing]", role, name)
+	}
+	return fmt.Sprintf("[%s:%s/%s]", role, p.Type, p.Model)
 }
 
 // thinkingPhrase returns a cyberpunk-themed status phrase that changes slowly during generation

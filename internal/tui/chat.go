@@ -90,6 +90,16 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 			m.mode = modeChat
 			m.renderMessages()
 		}
+		if shouldAutoGeneratePlan(prompt) {
+			m.input.Reset()
+			m.pasteText = ""
+			m.pasteLines = 0
+			m.historyIdx = 0
+			m.historyDraft = ""
+			m.addSystemNote("Coding request detected. Generating a bounded worker plan instead of asking the planning model to write code directly. Review and approve the plan, then run `/run-workers`.")
+			updated, cmd, _ := m.generatePlanCommand(prompt)
+			return updated, cmd
+		}
 		m.input.Reset()
 		m.pasteText = ""
 		m.pasteLines = 0
@@ -154,6 +164,46 @@ func (m model) orchestratorPrompt(prompt string) string {
 		return prompt
 	}
 	return strings.Join(sections, "\n\n") + "\n\nUser request:\n" + prompt
+}
+
+func shouldAutoGeneratePlan(prompt string) bool {
+	text := " " + strings.ToLower(strings.TrimSpace(prompt)) + " "
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	action := []string{
+		" add ", " build ", " change ", " code ", " create ", " delete ", " edit ", " fix ",
+		" implement ", " refactor ", " remove ", " rename ", " replace ", " update ", " write ",
+	}
+	hasAction := false
+	for _, marker := range action {
+		if strings.Contains(text, marker) {
+			hasAction = true
+			break
+		}
+	}
+	if !hasAction {
+		return false
+	}
+	readOnly := []string{
+		" explain ", " describe ", " summarize ", " inspect ", " look at ", " analyze ", " review ",
+		" what ", " why ", " how ", " where ", " list ", " show ", " find ", " search ",
+	}
+	for _, marker := range readOnly {
+		if strings.Contains(text, marker) && !strings.Contains(text, " and ") && !strings.Contains(text, " then ") {
+			return false
+		}
+	}
+	target := []string{
+		" app", " bug", " code", " component", " endpoint", " feature", " file", " function",
+		" handler", " module", " package", " page", " repo", " route", " script", " test", " ui",
+	}
+	for _, marker := range target {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return strings.Contains(text, " in ") || strings.Contains(text, " under ") || strings.Contains(text, " for ")
 }
 
 func (m model) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
