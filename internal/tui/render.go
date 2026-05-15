@@ -8,12 +8,18 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/bprendie/weazlcode/internal/config"
 	"github.com/bprendie/weazlcode/internal/storage"
 )
 
 func (m model) View() string {
 	header := renderLogo(ansiHeader(), max(20, m.width-6))
-	status := m.styles.status.Render(m.status)
+	statusParts := []string{m.modelProviderBar()}
+	if strings.TrimSpace(m.status) != "" {
+		statusParts = append(statusParts, strings.TrimSpace(m.status))
+	}
+	statusText := strings.Join(statusParts, " | ")
+	status := m.styles.status.Render(statusText)
 	if m.err != "" {
 		status = m.styles.system.Render("! " + m.err)
 	}
@@ -45,6 +51,21 @@ func (m model) View() string {
 	}
 	help := m.styles.help.Render(m.helpText())
 	return m.styles.frame.Width(m.width).Height(m.height).Render(strings.Join([]string{header, status, body, help}, "\n"))
+}
+
+func (m model) modelProviderBar() string {
+	return strings.Join([]string{
+		roleProviderBadge("plan", m.providerNameForRole("orchestrator"), m.cfg.ProviderForRole("orchestrator")),
+		roleProviderBadge("worker", m.providerNameForRole("worker"), m.cfg.ProviderForRole("worker")),
+		roleProviderBadge("review", m.providerNameForRole("reviewer"), m.cfg.ProviderForRole("reviewer")),
+	}, "  ")
+}
+
+func roleProviderBadge(role, name string, provider config.Provider) string {
+	if provider.Type == "" && provider.Model == "" {
+		return fmt.Sprintf("%s:%s missing", role, name)
+	}
+	return fmt.Sprintf("%s:%s/%s", role, provider.Type, provider.Model)
 }
 
 func (m model) renameWorkspaceView() string {

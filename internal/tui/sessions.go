@@ -90,11 +90,11 @@ func (m model) loadPreviousSession() tea.Cmd {
 }
 
 func (m model) newSession() (tea.Model, tea.Cmd) {
-	p := m.cfg.Active()
+	p := m.cfg.ProviderForRole("orchestrator")
 	sess := storage.Session{
 		ID:          uuid.NewString(),
 		Title:       "New session",
-		Provider:    m.cfg.ActiveProvider,
+		Provider:    m.providerNameForRole("orchestrator"),
 		Model:       p.Model,
 		ProjectRoot: m.project.Root,
 	}
@@ -112,7 +112,7 @@ func (m model) newSession() (tea.Model, tea.Cmd) {
 	m.historyIdx = 0
 	m.historyDraft = ""
 	m.mode = modeChat
-	m.status = fmt.Sprintf("%s %s | %s", p.Type, p.Model, m.project.StatusLabel())
+	m.status = "ready"
 	m.renderMessages()
 	return m, nil
 }
@@ -337,7 +337,7 @@ func (m model) finishRenameWorkspace() (tea.Model, tea.Cmd) {
 	m.input.SetValue(m.renameDraft)
 	m.input.CursorEnd()
 	m.renameDraft = ""
-	m.input.Placeholder = "message " + m.cfg.Active().Model
+	m.input.Placeholder = "message " + m.cfg.ProviderForRole("orchestrator").Model
 	m.err = ""
 	m.status = "renamed workspace: " + name
 	if m.activeWorkspaceID == renamedID {
@@ -360,7 +360,7 @@ func (m model) cancelRenameWorkspace() (tea.Model, tea.Cmd) {
 	m.input.SetValue(m.renameDraft)
 	m.input.CursorEnd()
 	m.renameDraft = ""
-	m.input.Placeholder = "message " + m.cfg.Active().Model
+	m.input.Placeholder = "message " + m.cfg.ProviderForRole("orchestrator").Model
 	m.mode = returnMode
 	if m.mode == modeChat {
 		m.input.Focus()

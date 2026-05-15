@@ -55,7 +55,7 @@ func (m model) trimContext(auto bool, prompt string, currentPromptID, throughID 
 	m.err = ""
 	m.status = "trimming context"
 	return m, tea.Batch(
-		summarizeContext(m.cfg.Active(), m.store, m.session.ID, toSummarize, auto, prompt, currentPromptID, throughID),
+		summarizeContext(m.cfg.ProviderForRole("summarizer"), m.store, m.session.ID, toSummarize, auto, prompt, currentPromptID, throughID),
 		m.working.Tick,
 	)
 }
@@ -158,7 +158,7 @@ func (m model) contextTokenEstimateFor(messages []storage.Message) int {
 }
 
 func (m model) contextBudget() int {
-	if p := m.cfg.Active(); p.ContextWindow > 0 {
+	if p := m.cfg.ProviderForRole("orchestrator"); p.ContextWindow > 0 {
 		return p.ContextWindow
 	}
 	return 32768

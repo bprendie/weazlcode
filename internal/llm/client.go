@@ -70,6 +70,16 @@ func (c Client) Stream(ctx context.Context, history []storage.Message, prompt st
 	case "vllm":
 		messages := chatMessages(history, prompt)
 		return c.streamOpenAICompat(ctx, messages, onEvent)
+	case "anthropic":
+		messages := chatMessages(history, prompt)
+		content, usage, err := c.CompleteWithUsage(ctx, messages, 2048)
+		if err != nil {
+			return usage, err
+		}
+		if strings.TrimSpace(content) != "" {
+			onEvent(StreamEvent{Type: "content", Content: content})
+		}
+		return usage, nil
 	case "ollama":
 		messages := ollamaChatMessages(history, prompt)
 		return c.streamOllama(ctx, messages, onEvent)

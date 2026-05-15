@@ -87,6 +87,19 @@ func TestSlashModelsCommand(t *testing.T) {
 	}
 }
 
+func TestModelProviderBarShowsSplitBrainProviders(t *testing.T) {
+	m := commandTestModel()
+	m.cfg.Providers["planning-llm"] = config.Provider{Type: "anthropic", Model: "claude-test"}
+	m.cfg.ModelRoles.Orchestrator = "planning-llm"
+	m.cfg.ModelRoles.Reviewer = "planning-llm"
+	bar := m.modelProviderBar()
+	for _, want := range []string{"plan:anthropic/claude-test", "worker:ollama/llama3.1", "review:anthropic/claude-test"} {
+		if !strings.Contains(bar, want) {
+			t.Fatalf("bar missing %q: %s", want, bar)
+		}
+	}
+}
+
 func TestSlashDurableIDEViews(t *testing.T) {
 	m := commandTestModel(t)
 	for _, command := range []string{"/tools", "/skills", "/config", "/outputs", "/files"} {

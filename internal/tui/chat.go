@@ -52,7 +52,7 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 			}
 		}
 		m.input.Reset()
-		m.input.Placeholder = "message " + m.cfg.Active().Model
+		m.input.Placeholder = "message " + m.cfg.ProviderForRole("orchestrator").Model
 		return m.startChat()
 	case modeSessions:
 		item, ok := m.sessions.SelectedItem().(sessionItem)

@@ -196,6 +196,37 @@ func TestCompleteWithUsageAnthropic(t *testing.T) {
 	}
 }
 
+func TestStreamAnthropicUsesMessagesAPI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			t.Fatalf("path = %q, want /v1/messages", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "test-key" {
+			t.Fatalf("x-api-key = %q, want test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":" streamed "}],"usage":{"input_tokens":11,"output_tokens":4}}`))
+	}))
+	defer server.Close()
+
+	client := New(config.Provider{Type: "anthropic", Model: "claude-test", ServerURL: server.URL, APIKey: "test-key"})
+	var chunks []string
+	usage, err := client.Stream(context.Background(), nil, "hello", func(event StreamEvent) {
+		if event.Type == "content" {
+			chunks = append(chunks, event.Content)
+		}
+	})
+	if err != nil {
+		t.Fatalf("Stream returned error: %v", err)
+	}
+	if strings.Join(chunks, "") != "streamed" {
+		t.Fatalf("chunks = %#v, want streamed", chunks)
+	}
+	if usage.InputTokens != 11 || usage.OutputTokens != 4 {
+		t.Fatalf("usage = %#v, want 11/4", usage)
+	}
+}
+
 func TestCompleteWithUsageRetriesTransientHTTPFailures(t *testing.T) {
 	oldDelay := postRetryDelay
 	postRetryDelay = func(int) time.Duration { return 0 }
