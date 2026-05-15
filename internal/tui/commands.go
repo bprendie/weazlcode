@@ -24,6 +24,18 @@ import (
 const maxRepairAttempts = 2
 const maxWorkerPatchDiffRepairAttempts = 2
 const maxPlanGenerateTokens = 8192
+const maxTaskBaselineBytes = 2 * 1024 * 1024
+
+type taskBaselinePayload struct {
+	Files     []taskBaselineFile `json:"files"`
+	Truncated bool               `json:"truncated,omitempty"`
+}
+
+type taskBaselineFile struct {
+	Path    string `json:"path"`
+	Exists  bool   `json:"exists"`
+	Content string `json:"content,omitempty"`
+}
 
 func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(input), "/") {
@@ -469,6 +481,11 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 		m.status = "run task failed"
 		return m, nil, true
 	}
+	if err := m.recordTaskBaseline(task); err != nil {
+		m.addSystemNote("Run task error: " + err.Error())
+		m.status = "run task failed"
+		return m, nil, true
+	}
 	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusRunning); err != nil {
 		m.addSystemNote("Run task error: " + err.Error())
 		m.status = "run task failed"
@@ -538,6 +555,11 @@ func (m model) runParallelWorkers() (tea.Model, tea.Cmd, bool) {
 	for _, dispatch := range dispatches {
 		task := dispatch.task
 		packet := dispatch.packet
+		if err := m.recordTaskBaseline(task); err != nil {
+			m.addSystemNote("Parallel worker error: " + err.Error())
+			m.status = "parallel workers failed"
+			return m, nil, true
+		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusRunning); err != nil {
 			m.addSystemNote("Parallel worker error: " + err.Error())
 			m.status = "parallel workers failed"
@@ -637,7 +659,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Payload: payload,
 		})
 		m.addSystemNote(fmt.Sprintf("Worker reported blocker for %s:\n%s", task.Title, patch.Blocker))
-		m.status = "task blocked"
+		m.status = "worker reported blocker"
 		return m, nil, true
 	}
 	paths := coding.PatchPaths(patch.Patch)
@@ -703,11 +725,11 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 				return m.applyWorkerPatchWithRepair(repaired, true, repairAttempts+1, applyErrors, nil)
 			}
 			m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, repairErr))
-			m.status = "worker patch failed"
+			m.status = "worker patch apply failed"
 			return m, nil, true
 		}
 		m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, nil))
-		m.status = "worker patch failed"
+		m.status = "worker patch apply failed"
 		return m, nil, true
 	}
 	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusReviewing); err != nil {
@@ -1319,15 +1341,20 @@ func (m model) reviewDiffCommandText() string {
 	if !ok {
 		return "Review diff:\nNo reviewing task found. Run a worker patch first."
 	}
-	files, filesErr := m.changedFiles()
-	diff, diffErr := m.gitDiff()
-	events, _ := m.store.TaskEvents(task.ID)
+	events, eventsErr := m.store.TaskEvents(task.ID)
+	diff, diffErr := m.taskReviewDiff(task, events)
+	paths := coding.PatchPaths(diff)
 	var b strings.Builder
 	fmt.Fprintf(&b, "Review diff: %s\nstatus: %s\nplan: %s\n\nGoal:\n%s\n", task.Title, task.Status, plan.Title, task.Goal)
-	if filesErr != nil {
-		fmt.Fprintf(&b, "\nChanged files error: %s\n", filesErr)
+	if diffErr != nil {
+		fmt.Fprintf(&b, "\nChanged files error: %s\n", diffErr)
+	} else if len(paths) > 0 {
+		fmt.Fprintf(&b, "\nChanged files:\n%s", bulletList(paths))
 	} else {
-		fmt.Fprintf(&b, "\nChanged files:\n%s", emptyFallback(files, "No changed files.\n"))
+		b.WriteString("\nChanged files:\nNo task-scoped changes.\n")
+	}
+	if eventsErr != nil {
+		fmt.Fprintf(&b, "\nEvents error: %s\n", eventsErr)
 	}
 	if len(events) > 0 {
 		fmt.Fprintf(&b, "\nEvents:\n%s\n", taskEventsSummary(events))
@@ -1339,7 +1366,7 @@ func (m model) reviewDiffCommandText() string {
 	if diffErr != nil {
 		fmt.Fprintf(&b, "\nDiff error: %s", diffErr)
 	} else {
-		fmt.Fprintf(&b, "\nDiff:\n%s", emptyFallback(diff, "No diff."))
+		fmt.Fprintf(&b, "\nTask-scoped diff:\n%s", emptyFallback(diff, "No diff."))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -1360,11 +1387,11 @@ func (m model) buildReviewerInput() (coding.ReviewerInput, error) {
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
-	diff, err := m.taskGitDiff(task)
+	events, err := m.store.TaskEvents(task.ID)
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
-	events, err := m.store.TaskEvents(task.ID)
+	diff, err := m.taskReviewDiff(task, events)
 	if err != nil {
 		return coding.ReviewerInput{}, err
 	}
@@ -1591,7 +1618,11 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 
 func (m model) reviewApprovalIssues(task coding.Task) []string {
 	var issues []string
-	diff, err := m.taskGitDiff(task)
+	events, err := m.store.TaskEvents(task.ID)
+	if err != nil {
+		issues = append(issues, "could not read task events: "+err.Error())
+	}
+	diff, err := m.taskReviewDiff(task, events)
 	if err != nil {
 		issues = append(issues, "could not read git diff: "+err.Error())
 	} else {
@@ -1607,10 +1638,7 @@ func (m model) reviewApprovalIssues(task coding.Task) []string {
 	}
 	verification := m.taskVerification(task)
 	if len(verification) > 0 {
-		events, err := m.store.TaskEvents(task.ID)
-		if err != nil {
-			issues = append(issues, "could not read verification events: "+err.Error())
-		} else if latestVerificationFailed(events) {
+		if latestVerificationFailed(events) {
 			issues = append(issues, "latest verification failed")
 		} else if !latestVerificationPassed(events) {
 			issues = append(issues, "verification was expected but no passing verification event was recorded")
@@ -1717,6 +1745,222 @@ func (m model) taskGitDiff(task coding.Task) (string, error) {
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func (m model) recordTaskBaseline(task coding.Task) error {
+	baseline, err := m.captureTaskBaseline(task)
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(baseline)
+	if err != nil {
+		return err
+	}
+	message := fmt.Sprintf("Captured baseline for %d allowed file(s).", len(baseline.Files))
+	if baseline.Truncated {
+		message += " Baseline was truncated."
+	}
+	_, err = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "task_baseline",
+		Message: message,
+		Payload: payload,
+	})
+	return err
+}
+
+func (m model) captureTaskBaseline(task coding.Task) (taskBaselinePayload, error) {
+	var baseline taskBaselinePayload
+	total := 0
+	seen := map[string]bool{}
+	for _, rawPath := range taskAllowedPaths(task) {
+		path := strings.TrimSpace(filepath.ToSlash(rawPath))
+		if path == "" || path == "." || strings.Contains(path, "\x00") || filepath.IsAbs(path) || strings.HasPrefix(filepath.Clean(path), "..") || seen[path] {
+			continue
+		}
+		seen[path] = true
+		fullPath := filepath.Join(m.project.Root, filepath.FromSlash(path))
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				baseline.Files = append(baseline.Files, taskBaselineFile{Path: path, Exists: false})
+				continue
+			}
+			return baseline, err
+		}
+		if info.IsDir() {
+			continue
+		}
+		if total+int(info.Size()) > maxTaskBaselineBytes {
+			baseline.Truncated = true
+			continue
+		}
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			return baseline, err
+		}
+		total += len(content)
+		baseline.Files = append(baseline.Files, taskBaselineFile{
+			Path:    path,
+			Exists:  true,
+			Content: string(content),
+		})
+	}
+	return baseline, nil
+}
+
+func (m model) taskReviewDiff(task coding.Task, events []coding.TaskEvent) (string, error) {
+	if baseline, ok := latestTaskBaseline(events); ok && len(baseline.Files) > 0 {
+		diff, err := m.taskBaselineDiff(task, baseline)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(diff) != "" {
+			return diff, nil
+		}
+	}
+	return m.taskGitDiff(task)
+}
+
+func latestTaskBaseline(events []coding.TaskEvent) (taskBaselinePayload, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "task_baseline" || len(events[i].Payload) == 0 {
+			continue
+		}
+		var baseline taskBaselinePayload
+		if err := json.Unmarshal(events[i].Payload, &baseline); err != nil {
+			continue
+		}
+		return baseline, true
+	}
+	return taskBaselinePayload{}, false
+}
+
+func (m model) taskBaselineDiff(task coding.Task, baseline taskBaselinePayload) (string, error) {
+	var parts []string
+	for _, file := range baseline.Files {
+		if err := coding.ValidatePatchPaths([]string{file.Path}, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
+			return "", err
+		}
+		current, exists, err := m.readTaskFile(file.Path)
+		if err != nil {
+			return "", err
+		}
+		if file.Exists == exists && file.Content == current {
+			continue
+		}
+		parts = append(parts, renderFullFileDiff(file.Path, file.Exists, file.Content, exists, current))
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+func (m model) readTaskFile(path string) (string, bool, error) {
+	if strings.TrimSpace(path) == "" || strings.Contains(path, "\x00") || filepath.IsAbs(path) || strings.HasPrefix(filepath.Clean(path), "..") {
+		return "", false, fmt.Errorf("invalid task path %q", path)
+	}
+	content, err := os.ReadFile(filepath.Join(m.project.Root, filepath.FromSlash(path)))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return string(content), true, nil
+}
+
+func renderFullFileDiff(path string, oldExists bool, oldContent string, newExists bool, newContent string) string {
+	if diff := renderNoIndexDiff(path, oldExists, oldContent, newExists, newContent); strings.TrimSpace(diff) != "" {
+		return diff
+	}
+	oldLines := splitDiffLines(oldContent)
+	newLines := splitDiffLines(newContent)
+	var b strings.Builder
+	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
+	if !oldExists && newExists {
+		b.WriteString("new file mode 100644\n")
+		b.WriteString("--- /dev/null\n")
+		fmt.Fprintf(&b, "+++ b/%s\n", path)
+		fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", len(newLines))
+		for _, line := range newLines {
+			fmt.Fprintf(&b, "+%s\n", line)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	if oldExists && !newExists {
+		b.WriteString("deleted file mode 100644\n")
+		fmt.Fprintf(&b, "--- a/%s\n", path)
+		b.WriteString("+++ /dev/null\n")
+		fmt.Fprintf(&b, "@@ -1,%d +0,0 @@\n", len(oldLines))
+		for _, line := range oldLines {
+			fmt.Fprintf(&b, "-%s\n", line)
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	fmt.Fprintf(&b, "--- a/%s\n", path)
+	fmt.Fprintf(&b, "+++ b/%s\n", path)
+	fmt.Fprintf(&b, "@@ -1,%d +1,%d @@\n", len(oldLines), len(newLines))
+	for _, line := range oldLines {
+		fmt.Fprintf(&b, "-%s\n", line)
+	}
+	for _, line := range newLines {
+		fmt.Fprintf(&b, "+%s\n", line)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderNoIndexDiff(path string, oldExists bool, oldContent string, newExists bool, newContent string) string {
+	dir, err := os.MkdirTemp("", "weazlcode-taskdiff-")
+	if err != nil {
+		return ""
+	}
+	defer os.RemoveAll(dir)
+	oldPath := filepath.Join(dir, "old")
+	newPath := filepath.Join(dir, "new")
+	if err := os.WriteFile(oldPath, []byte(oldContent), 0o600); err != nil {
+		return ""
+	}
+	if err := os.WriteFile(newPath, []byte(newContent), 0o600); err != nil {
+		return ""
+	}
+	cmd := exec.Command("git", "diff", "--no-index", "--", oldPath, newPath)
+	out, err := cmd.CombinedOutput()
+	if len(out) == 0 || err == nil {
+		return ""
+	}
+	return normalizeNoIndexDiff(string(out), path, oldExists, newExists)
+}
+
+func normalizeNoIndexDiff(diff, path string, oldExists, newExists bool) string {
+	var out []string
+	for _, line := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			out = append(out, fmt.Sprintf("diff --git a/%s b/%s", path, path))
+		case strings.HasPrefix(line, "--- "):
+			if oldExists {
+				out = append(out, "--- a/"+path)
+			} else {
+				out = append(out, "--- /dev/null")
+			}
+		case strings.HasPrefix(line, "+++ "):
+			if newExists {
+				out = append(out, "+++ b/"+path)
+			} else {
+				out = append(out, "+++ /dev/null")
+			}
+		default:
+			out = append(out, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func splitDiffLines(content string) []string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 func gitDiffOutputEmpty(diff string) bool {
@@ -1972,13 +2216,25 @@ func retryableWorkerErrorTask(events []coding.TaskEvent) bool {
 func latestWorkerError(events []coding.TaskEvent) (string, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		switch events[i].Type {
-		case "worker_error":
+		case "worker_error", "worker_timeout", "worker_json_error":
 			return strings.TrimSpace(events[i].Message), true
 		case "worker_model", "worker_patch", "worker_blocker", "repair_start", "repair_limit", "reviewer_verdict":
 			return "", false
 		}
 	}
 	return "", false
+}
+
+func classifyWorkerRunError(err error) (eventType, status, note string) {
+	text := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(text, "context deadline exceeded") || strings.Contains(text, "timeout") || strings.Contains(text, "deadline exceeded"):
+		return "worker_timeout", "worker provider timeout", "Worker provider timeout"
+	case strings.Contains(text, "parse") || strings.Contains(text, "json") || strings.Contains(text, "raw response"):
+		return "worker_json_error", "worker json failed", "Worker returned malformed patch JSON"
+	default:
+		return "worker_error", "worker run failed", "Worker model error"
+	}
 }
 
 func repairAttemptCount(events []coding.TaskEvent) int {

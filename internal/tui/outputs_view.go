@@ -100,7 +100,7 @@ func taskEventOutputEntries(task coding.Task, events []coding.TaskEvent) []outpu
 
 func visibleTaskEvent(eventType string) bool {
 	switch eventType {
-	case "worker_patch", "worker_blocker", "verification", "verification_error", "reviewer_verdict", "repair_requested", "repair_start", "repair_limit":
+	case "task_baseline", "worker_patch", "worker_blocker", "worker_error", "worker_timeout", "worker_json_error", "worker_rejected", "verification", "verification_error", "reviewer_verdict", "review_guardrail", "repair_requested", "repair_start", "repair_limit":
 		return true
 	default:
 		return false

@@ -718,7 +718,7 @@ func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 2 || events[1].Type != "worker_start" || len(events[1].Payload) == 0 {
+	if len(events) != 3 || events[1].Type != "task_baseline" || events[2].Type != "worker_start" || len(events[2].Payload) == 0 {
 		t.Fatalf("events = %#v", events)
 	}
 	if !strings.Contains(got.viewport.View(), `"tools_allowed"`) {
@@ -982,7 +982,7 @@ func TestWorkerRunErrorBlocksTask(t *testing.T) {
 	taskID := plan.Tasks[0].ID
 	m.workerRuns = map[int]string{9: taskID}
 	m.cancelWorkerRuns = map[int]context.CancelFunc{9: func() {}}
-	updated, _ = m.Update(workerRunMsg{runID: 9, err: errors.New("provider 502")})
+	updated, _ = m.Update(workerRunMsg{runID: 9, err: errors.New("context deadline exceeded")})
 	got := updated.(model)
 	plan, ok, err = got.store.LatestPlan(got.session.ID)
 	if err != nil || !ok {
@@ -995,7 +995,7 @@ func TestWorkerRunErrorBlocksTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if events[len(events)-1].Type != "worker_error" {
+	if events[len(events)-1].Type != "worker_timeout" {
 		t.Fatalf("events = %#v", events)
 	}
 	packet := got.packetCommandText()
@@ -1083,8 +1083,8 @@ func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 		t.Fatal("worker-patch handled = false")
 	}
 	got := updated.(model)
-	if got.status != "task blocked" {
-		t.Fatalf("status = %q, want task blocked", got.status)
+	if got.status != "worker reported blocker" {
+		t.Fatalf("status = %q, want worker reported blocker", got.status)
 	}
 	plan, ok, err = got.store.LatestPlan(got.session.ID)
 	if err != nil {
@@ -1097,7 +1097,7 @@ func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 3 || events[2].Type != "worker_blocker" {
+	if len(events) != 4 || events[3].Type != "worker_blocker" {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -1125,7 +1125,7 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 4 || events[2].Type != "worker_patch" || events[3].Type != "verification" || len(events[3].Payload) == 0 {
+	if len(events) != 5 || events[3].Type != "worker_patch" || events[4].Type != "verification" || len(events[4].Payload) == 0 {
 		t.Fatalf("events = %#v", events)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(root, ".weazlcode", "runs", got.session.ID))
@@ -1409,6 +1409,59 @@ func TestReviewerInputScopesDiffToCurrentTask(t *testing.T) {
 	}
 }
 
+func TestReviewerInputUsesTaskBaselineForDirtyAllowedFile(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile committed: %v", err)
+	}
+	runTestGit(t, root, "add", "README.md")
+	runTestGit(t, root, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("committed\npreexisting dirty\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile dirty: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker patch","tasks":[{"title":"Update README","goal":"Add worker line","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README has worker line"}]}]}`
+	updated, _, _ := m.handleSlashCommand("/plan import " + rawPlan)
+	m = updated.(model)
+	updated, _, _ = m.handleSlashCommand("/approve")
+	m = updated.(model)
+	updated, _, _ = m.handleSlashCommand("/run-task")
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,3 @@
+ committed
+ preexisting dirty
++worker line
+`
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Added worker line", Patch: patch})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, _ = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	m = updated.(model)
+	input, err := m.buildReviewerInput()
+	if err != nil {
+		t.Fatalf("buildReviewerInput: %v", err)
+	}
+	if strings.Contains(input.Diff, "-committed") || strings.Contains(input.Diff, "-preexisting dirty") {
+		t.Fatalf("reviewer diff included baseline dirty content as removals:\n%s", input.Diff)
+	}
+	if !strings.Contains(input.Diff, "+worker line") {
+		t.Fatalf("reviewer diff missing worker change:\n%s", input.Diff)
+	}
+}
+
 func TestReviewerVerdictMessages(t *testing.T) {
 	input := coding.ReviewerInput{
 		TaskPacket: coding.TaskPacket{TaskID: "task-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}},
@@ -1478,7 +1531,7 @@ func TestSlashReviewDiffCommandShowsChangedFilesAndCommands(t *testing.T) {
 		t.Fatalf("status = %q, want view review-diff", got.status)
 	}
 	view := got.reviewDiffCommandText()
-	for _, want := range []string{"Review diff: Update README", "Changed files:", "README.md", "/review approve", "/review needs-fix", "Diff:"} {
+	for _, want := range []string{"Review diff: Update README", "Changed files:", "README.md", "/review approve", "/review needs-fix", "Task-scoped diff:"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("review diff missing %q:\n%s", want, view)
 		}
@@ -1565,7 +1618,7 @@ func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 5 || events[4].Type != "reviewer_verdict" {
+	if len(events) != 6 || events[5].Type != "reviewer_verdict" {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -1686,7 +1739,7 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 6 || events[5].Type != "repair_requested" {
+	if len(events) != 7 || events[6].Type != "repair_requested" {
 		t.Fatalf("events = %#v", events)
 	}
 	updated, _, handled = m.handleSlashCommand("/run-task")
@@ -1708,11 +1761,11 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 7 || events[6].Type != "repair_start" {
+	if len(events) != 9 || events[7].Type != "task_baseline" || events[8].Type != "repair_start" {
 		t.Fatalf("events = %#v", events)
 	}
-	if !strings.Contains(string(events[6].Payload), "Repair focus") || !strings.Contains(string(events[6].Payload), "Use the requested wording only") {
-		t.Fatalf("repair payload = %s", events[6].Payload)
+	if !strings.Contains(string(events[8].Payload), "Repair focus") || !strings.Contains(string(events[8].Payload), "Use the requested wording only") {
+		t.Fatalf("repair payload = %s", events[8].Payload)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
 	for _, want := range []string{"repair_request", "repair_packet"} {

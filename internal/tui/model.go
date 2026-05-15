@@ -427,14 +427,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.cancelWorkerRuns, msg.runID)
 		m.thinking = m.hasModelWork()
 		if msg.err != nil {
+			eventType, status, note := classifyWorkerRunError(msg.err)
 			_ = m.store.UpdateTaskStatus(taskID, coding.TaskStatusBlocked)
 			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 				TaskID:  taskID,
-				Type:    "worker_error",
+				Type:    eventType,
 				Message: msg.err.Error(),
 			})
-			m.addSystemNote("Worker model error: " + msg.err.Error())
-			m.status = "worker run failed"
+			m.addSystemNote(note + ": " + msg.err.Error())
+			m.status = status
 			return m, nil
 		}
 		next, cmd, _ := m.applyWorkerPatchWithTelemetry(msg.patch, true, &msg.telemetry)
