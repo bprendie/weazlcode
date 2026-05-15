@@ -21,6 +21,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Skills Surface: Project and global `SKILL.md` discovery, `/skills` inspection, planner skill selection, and explicit task-level skill attachment.
 - Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, per-task worker cancellation, and configurable worker request timeouts.
 - Review Loops: Claude/OpenAI-class reviewers can inspect task-scoped evidence, request focused repairs, and send only bounded repair packets back to the local worker.
+- Replan And Cleanup: Rejected or blocked worker outputs are restored to their task baselines, and `/plan replan` can turn completed work, blocked evidence, and remaining tasks into a fresh draft plan.
 
 ## Defaults
 
@@ -97,7 +98,7 @@ weazlcode init
 
 Slash commands drive the IDE. Hit `/` to open the palette.
 
-- Workflow: `/plan draft`, `/plan generate`, `/run-task`, `/run-worker`, `/run-workers`, `/run-reviewer`, `/commit-message`, `/export-run`.
+- Workflow: `/plan draft`, `/plan generate`, `/plan replan`, `/run-task`, `/run-worker`, `/run-workers`, `/run-reviewer`, `/commit-message`, `/export-run`.
 - Views: `/diff`, `/outputs`, `/files`, `/preview`, `/skills`, `/diagnostics`, `/symbols`.
 - Control: `ctrl+t` trims context, `ctrl+u` nukes active session context, `ctrl+s` saves workspace, and `ctrl+r` / `ctrl+w` opens the workspace picker.
 - Mouse/Copy: `ctrl+m` toggles between terminal copy mode and TUI mouse-scroll mode.
@@ -109,6 +110,17 @@ The status line gives you the vitals on your local inference: estimated context 
 Running out of room? Press `ctrl+t`. WeazlCode commands the active model to summarize the current conversation into a compact checkpoint. Future requests send that tight summary plus only the new messages, saving your hardware from replaying the entire session from the top.
 
 If you forget to trim, WeazlCode steps in with opinionated working-context thresholds. Small windows run close to the edge; large windows compact much earlier so your 128k context stays as useful headroom instead of degrading into a giant prompt tax.
+
+## Review, Repair, Replan
+
+The happy path is simple: the orchestrator creates small tasks, local workers write patches, and the reviewer approves the task-scoped diff. When the worker gets it wrong, WeazlCode keeps the blast radius tight:
+
+- Reviewer `needs_fix` verdicts restore the task's allowed paths to the captured baseline before sending a focused repair packet back to the worker.
+- Worker blockers and reviewer-blocked tasks also restore their allowed paths, so rejected files do not linger as half-truths in your repo.
+- Every cleanup is recorded as an `output_cleanup` task event.
+- `/plan replan [guidance]` asks the orchestrator to build a fresh draft plan from completed tasks, blocked-task evidence, and still-pending work.
+
+That is the split-brain bargain: local models can try, fail, and retry cheaply, while the frontier model spends tokens on judgment and plan correction instead of writing every line itself.
 
 ## TUI Feedback
 
