@@ -100,6 +100,7 @@ func PrepareImportedPlan(plan Plan, sessionID, projectRoot string, idFunc func()
 		plan.Tasks[i].ForbiddenPaths = normalizePlanPaths(plan.Tasks[i].ForbiddenPaths, projectRoot)
 		plan.Tasks[i].ContextFiles = normalizePlanPaths(plan.Tasks[i].ContextFiles, projectRoot)
 		plan.Tasks[i].Skills = normalizePlanSkills(plan.Tasks[i].Skills)
+		plan.Tasks[i].DependsOn = normalizePlanSkills(plan.Tasks[i].DependsOn)
 		if strings.TrimSpace(plan.Tasks[i].Status) == "" {
 			plan.Tasks[i].Status = TaskStatusPending
 		}

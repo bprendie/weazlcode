@@ -85,6 +85,8 @@ type model struct {
 	modelRunID          int
 	activeModelRunID    int
 	cancelModel         context.CancelFunc
+	workerRuns          map[int]string
+	cancelWorkerRuns    map[int]context.CancelFunc
 }
 
 type streamEvent struct {
@@ -160,22 +162,24 @@ func New(cfg config.Config, cfgPath string, store *storage.Store, toolRegistry *
 	contextBar := progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage())
 
 	return model{
-		cfg:          cfg,
-		cfgPath:      cfgPath,
-		project:      projectSummary,
-		store:        store,
-		toolRegistry: toolRegistry,
-		styles:       s,
-		mode:         modeVault,
-		input:        ti,
-		viewport:     viewport.New(0, 0),
-		markdown:     markdownRenderer{enabled: cfg.UI.MarkdownEnabled(), style: cfg.UI.MarkdownStyle},
-		sessions:     sessions,
-		workspaces:   workspaces,
-		working:      working,
-		contextBar:   contextBar,
-		mouseScroll:  true,
-		status:       "project " + projectSummary.StatusLabel(),
+		cfg:              cfg,
+		cfgPath:          cfgPath,
+		project:          projectSummary,
+		store:            store,
+		toolRegistry:     toolRegistry,
+		styles:           s,
+		mode:             modeVault,
+		input:            ti,
+		viewport:         viewport.New(0, 0),
+		markdown:         markdownRenderer{enabled: cfg.UI.MarkdownEnabled(), style: cfg.UI.MarkdownStyle},
+		sessions:         sessions,
+		workspaces:       workspaces,
+		working:          working,
+		contextBar:       contextBar,
+		mouseScroll:      true,
+		status:           "project " + projectSummary.StatusLabel(),
+		workerRuns:       map[int]string{},
+		cancelWorkerRuns: map[int]context.CancelFunc{},
 	}
 }
 
@@ -309,8 +313,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.done {
 			return m, waitStream(m.stream)
 		}
-		m.thinking = false
 		m.stream = nil
+		m.thinking = m.hasModelWork()
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.status = "request failed"
@@ -358,7 +362,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case contextTrimMsg:
 		m.trimming = false
-		m.thinking = false
+		m.thinking = m.hasModelWork()
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			m.status = "context trim failed"
@@ -395,7 +399,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activeModelRunID = 0
 		m.cancelModel = nil
-		m.thinking = false
+		m.thinking = m.hasModelWork()
 		if msg.err != nil {
 			m.addSystemNote("Plan generate error: " + msg.err.Error())
 			m.status = "plan generate failed"
@@ -415,13 +419,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "plan generated"
 		return m, nil
 	case workerRunMsg:
-		if msg.runID != m.activeModelRunID {
+		taskID, ok := m.workerRuns[msg.runID]
+		if !ok {
 			return m, nil
 		}
-		m.activeModelRunID = 0
-		m.cancelModel = nil
-		m.thinking = false
+		delete(m.workerRuns, msg.runID)
+		delete(m.cancelWorkerRuns, msg.runID)
+		m.thinking = m.hasModelWork()
 		if msg.err != nil {
+			_ = m.store.UpdateTaskStatus(taskID, coding.TaskStatusBlocked)
+			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+				TaskID:  taskID,
+				Type:    "worker_error",
+				Message: msg.err.Error(),
+			})
 			m.addSystemNote("Worker model error: " + msg.err.Error())
 			m.status = "worker run failed"
 			return m, nil
@@ -434,7 +445,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.activeModelRunID = 0
 		m.cancelModel = nil
-		m.thinking = false
+		m.thinking = m.hasModelWork()
 		if msg.err != nil {
 			m.addSystemNote("Reviewer model error: " + msg.err.Error())
 			m.status = "reviewer run failed"
@@ -444,6 +455,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	case previousSessionMsg:
 		m.thinking = false
+		m.workerRuns = map[int]string{}
+		m.cancelWorkerRuns = map[int]context.CancelFunc{}
 		if msg.err != nil {
 			m.err = msg.err.Error()
 			return m.newSession()
@@ -509,6 +522,10 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m model) hasModelWork() bool {
+	return m.activeModelRunID != 0 || len(m.workerRuns) > 0 || m.stream != nil || m.trimming
 }
 
 func looksLikePaste(msg tea.KeyMsg) bool {

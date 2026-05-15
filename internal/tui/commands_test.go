@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,13 +47,13 @@ func TestSlashCommandsShowsPalette(t *testing.T) {
 	}
 	got := updated.(model)
 	view := got.viewport.View()
-	for _, want := range []string{"Command palette:", "Plan:", "/plan edit", "Worker:", "/run-worker", "Review:", "/review-diff"} {
+	for _, want := range []string{"Command palette:", "Plan:", "/plan edit", "Worker:", "/run-worker"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("palette missing %q:\n%s", want, view)
 		}
 	}
 	raw := commandPaletteText()
-	for _, want := range []string{"Skills:", "/skills"} {
+	for _, want := range []string{"Review:", "/review-diff", "Skills:", "/skills", "/run-workers"} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("raw palette missing %q:\n%s", want, raw)
 		}
@@ -685,6 +686,64 @@ func TestBuildWorkerPacketIncludesAttachedSkills(t *testing.T) {
 	}
 }
 
+func TestRunParallelWorkersStartsIndependentTasks(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Parallel","summary":"Run independent tasks","tasks":[{"title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]},{"title":"B","goal":"Update docs/guide.md to mention B.","allowed_paths":["docs/guide.md"],"acceptance_checks":[{"description":"guide mentions B"}]},{"title":"C","goal":"Update internal/app.go to mention C.","allowed_paths":["internal/app.go"],"depends_on":["missing-task"],"acceptance_checks":[{"description":"app mentions C"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, cmd, handled := m.handleSlashCommand("/run-workers")
+	if !handled {
+		t.Fatal("run-workers handled = false")
+	}
+	got := updated.(model)
+	if cmd == nil {
+		t.Fatal("cmd = nil, want worker batch")
+	}
+	if got.status != "running 2 worker(s)" || len(got.workerRuns) != 2 {
+		t.Fatalf("status/runs = %q/%#v", got.status, got.workerRuns)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	statusByTitle := map[string]string{}
+	for _, task := range plan.Tasks {
+		statusByTitle[task.Title] = task.Status
+	}
+	if statusByTitle["A"] != coding.TaskStatusRunning || statusByTitle["B"] != coding.TaskStatusRunning || statusByTitle["C"] != coding.TaskStatusPending {
+		t.Fatalf("task statuses = %#v", statusByTitle)
+	}
+}
+
+func TestParallelRunnableTasksRespectsDependenciesAndOverlap(t *testing.T) {
+	tasks := []coding.Task{
+		{ID: "done", Status: coding.TaskStatusDone, AllowedPaths: []string{"README.md"}},
+		{ID: "a", Status: coding.TaskStatusPending, AllowedPaths: []string{"internal/a.go"}, DependsOn: []string{"done"}},
+		{ID: "b", Status: coding.TaskStatusPending, AllowedPaths: []string{"internal"}, DependsOn: []string{"done"}},
+		{ID: "c", Status: coding.TaskStatusPending, AllowedPaths: []string{"docs/c.md"}, DependsOn: []string{"missing"}},
+		{ID: "d", Status: coding.TaskStatusPending, AllowedPaths: []string{"docs/d.md"}},
+	}
+	got := parallelRunnableTasks(tasks, 3)
+	ids := make([]string, 0, len(got))
+	for _, task := range got {
+		ids = append(ids, task.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"a", "d"}) {
+		t.Fatalf("selected ids = %#v", ids)
+	}
+}
+
 func TestWorkerPatchMessages(t *testing.T) {
 	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, ToolsAllowed: []string{"apply_patch"}}
 	messages := workerPatchMessages(packet)
@@ -770,6 +829,9 @@ func TestRunWorkerStartsAsync(t *testing.T) {
 	if !got.thinking || got.status != "running worker" {
 		t.Fatalf("thinking/status = %t/%q, want true/running worker", got.thinking, got.status)
 	}
+	if len(got.workerRuns) != 1 || len(got.cancelWorkerRuns) != 1 {
+		t.Fatalf("worker run state = %#v cancels=%#v", got.workerRuns, got.cancelWorkerRuns)
+	}
 }
 
 func TestCancelModelCommandCancelsActiveRun(t *testing.T) {
@@ -791,6 +853,39 @@ func TestCancelModelCommandCancelsActiveRun(t *testing.T) {
 	}
 }
 
+func TestCancelModelCommandCancelsOneWorkerTask(t *testing.T) {
+	m := commandTestModel(t)
+	cancelled := false
+	m.thinking = true
+	m.workerRuns = map[int]string{7: "task-1"}
+	m.cancelWorkerRuns = map[int]context.CancelFunc{7: func() { cancelled = true }}
+	updated, _, handled := m.handleSlashCommand("/cancel task-1")
+	if !handled {
+		t.Fatal("cancel handled = false")
+	}
+	got := updated.(model)
+	if !cancelled {
+		t.Fatal("worker cancel func was not called")
+	}
+	if got.thinking || len(got.workerRuns) != 0 || got.status != "worker cancelled" {
+		t.Fatalf("worker cancel state: thinking=%t runs=%#v status=%q", got.thinking, got.workerRuns, got.status)
+	}
+}
+
+func TestEnterAllowsCancelWhileThinking(t *testing.T) {
+	m := commandTestModel(t)
+	cancelled := false
+	m.thinking = true
+	m.workerRuns = map[int]string{7: "task-1"}
+	m.cancelWorkerRuns = map[int]context.CancelFunc{7: func() { cancelled = true }}
+	m.input.SetValue("/cancel workers")
+	updated, _ := m.handleEnter()
+	got := updated.(model)
+	if !cancelled || got.thinking || len(got.workerRuns) != 0 {
+		t.Fatalf("cancel while thinking failed: cancelled=%t thinking=%t runs=%#v", cancelled, got.thinking, got.workerRuns)
+	}
+}
+
 func TestStaleModelMessagesAreIgnored(t *testing.T) {
 	m := commandTestModel(t)
 	m.activeModelRunID = 2
@@ -799,6 +894,40 @@ func TestStaleModelMessagesAreIgnored(t *testing.T) {
 	got := updated.(model)
 	if !got.thinking || got.status != "" || got.activeModelRunID != 2 {
 		t.Fatalf("stale message changed model: thinking=%t status=%q run=%d", got.thinking, got.status, got.activeModelRunID)
+	}
+}
+
+func TestWorkerRunErrorBlocksTask(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Worker error","summary":"Block on error","tasks":[{"title":"Update README","goal":"Update README.md to document worker errors.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README documents worker errors"}]}]}`
+	updated, _, _ := m.handleSlashCommand("/plan import " + raw)
+	m = updated.(model)
+	updated, _, _ = m.handleSlashCommand("/approve")
+	m = updated.(model)
+	updated, _, _ = m.handleSlashCommand("/run-task")
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	taskID := plan.Tasks[0].ID
+	m.workerRuns = map[int]string{9: taskID}
+	m.cancelWorkerRuns = map[int]context.CancelFunc{9: func() {}}
+	updated, _ = m.Update(workerRunMsg{runID: 9, err: errors.New("provider 502")})
+	got := updated.(model)
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan after error: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("task status = %q, want blocked", plan.Tasks[0].Status)
+	}
+	events, err := got.store.TaskEvents(taskID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "worker_error" {
+		t.Fatalf("events = %#v", events)
 	}
 }
 

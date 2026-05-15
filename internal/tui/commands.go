@@ -46,7 +46,7 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "commands", "palette":
 		m.setIDEView("commands", commandPaletteText())
 	case "cancel":
-		return m.cancelModelCommand()
+		return m.cancelModelCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "project":
 		m.setIDEView("project", m.projectCommandText())
 	case "models":
@@ -109,6 +109,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		return m.runNextTask()
 	case "run-worker":
 		return m.runWorkerModel()
+	case "run-workers":
+		return m.runParallelWorkers()
 	case "worker-patch":
 		return m.importWorkerPatch(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "reviewer-input":
@@ -185,14 +187,45 @@ func (m *model) addSystemNote(text string) {
 	m.viewport.GotoBottom()
 }
 
-func (m model) cancelModelCommand() (tea.Model, tea.Cmd, bool) {
-	if m.cancelModel == nil || m.activeModelRunID == 0 {
+func (m model) cancelModelCommand(raw string) (tea.Model, tea.Cmd, bool) {
+	target := strings.TrimSpace(raw)
+	if target != "" && target != "all" && target != "workers" {
+		cancelled := 0
+		for runID, taskID := range m.workerRuns {
+			if target == taskID {
+				if cancel := m.cancelWorkerRuns[runID]; cancel != nil {
+					cancel()
+				}
+				delete(m.workerRuns, runID)
+				delete(m.cancelWorkerRuns, runID)
+				cancelled++
+			}
+		}
+		if cancelled == 0 {
+			m.status = "worker not found"
+			return m, nil, true
+		}
+		m.thinking = m.hasModelWork()
+		m.addSystemNote(fmt.Sprintf("Cancelled worker task %s.", target))
+		m.status = "worker cancelled"
+		return m, nil, true
+	}
+	if (m.cancelModel == nil || m.activeModelRunID == 0) && len(m.cancelWorkerRuns) == 0 {
 		m.status = "nothing to cancel"
 		return m, nil, true
 	}
-	m.cancelModel()
+	if target != "workers" && m.cancelModel != nil {
+		m.cancelModel()
+	}
 	m.cancelModel = nil
 	m.activeModelRunID = 0
+	for runID, cancel := range m.cancelWorkerRuns {
+		if cancel != nil {
+			cancel()
+		}
+		delete(m.workerRuns, runID)
+		delete(m.cancelWorkerRuns, runID)
+	}
 	m.thinking = false
 	m.addSystemNote("Cancelled active model request.")
 	m.status = "model cancelled"
@@ -204,7 +237,7 @@ func slashHelp() string {
 		"Slash commands:",
 		"/help - show commands",
 		"/commands - show grouped command palette",
-		"/cancel - cancel the active model request",
+		"/cancel [all|workers|task_id] - cancel active model requests",
 		"/project - show active project",
 		"/models - show model role mapping",
 		"/tools - list enabled tools",
@@ -240,6 +273,7 @@ func slashHelp() string {
 		"/reject [reason] - block the latest plan",
 		"/run-task - mark first pending task running and show its worker packet",
 		"/run-worker - ask configured worker role for a WorkerPatch JSON",
+		"/run-workers - dispatch independent pending tasks up to worker concurrency",
 		"/worker-patch <json> - import a worker patch or blocker for the running task",
 		"/reviewer-input - show frontier-review payload for the reviewing task",
 		"/run-reviewer - ask configured reviewer role for a verdict",
@@ -261,7 +295,7 @@ func commandPaletteText() string {
 		Commands []string
 	}{
 		{"Plan", []string{"/plan", "/plan generate <request>", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
-		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/worker-patch <json>"}},
+		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/run-workers", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
 		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
 		{"Skills", []string{"/skills"}},
@@ -454,6 +488,78 @@ func (m model) runNextTask() (tea.Model, tea.Cmd, bool) {
 	m.addSystemNote("Worker dispatch prepared:\n" + renderJSON(packet))
 	m.status = "task running"
 	return m, nil, true
+}
+
+func (m model) runParallelWorkers() (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Parallel worker error: " + err.Error())
+		m.status = "parallel workers failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan draft`, `/plan generate`, or `/plan import` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	if plan.Status != coding.PlanStatusApproved {
+		m.addSystemNote(fmt.Sprintf("Plan must be approved before running workers. Current status: %s", plan.Status))
+		m.status = "plan not approved"
+		return m, nil, true
+	}
+	candidates := parallelRunnableTasks(plan.Tasks, m.workerConcurrency()-len(m.workerRuns))
+	if len(candidates) == 0 {
+		m.addSystemNote("No independent pending tasks are available for parallel dispatch.")
+		m.status = "no parallel tasks"
+		return m, nil, true
+	}
+	type dispatch struct {
+		task   coding.Task
+		packet coding.TaskPacket
+	}
+	dispatches := make([]dispatch, 0, len(candidates))
+	for _, task := range candidates {
+		packet, err := m.buildWorkerPacketForRun(task)
+		if err != nil {
+			m.addSystemNote("Parallel worker error: " + err.Error())
+			m.status = "parallel workers failed"
+			return m, nil, true
+		}
+		dispatches = append(dispatches, dispatch{task: task, packet: packet})
+	}
+	var cmds []tea.Cmd
+	var packets []coding.TaskPacket
+	for _, dispatch := range dispatches {
+		task := dispatch.task
+		packet := dispatch.packet
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusRunning); err != nil {
+			m.addSystemNote("Parallel worker error: " + err.Error())
+			m.status = "parallel workers failed"
+			return m, nil, true
+		}
+		payload, _ := json.Marshal(packet)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "parallel_worker_start",
+			Message: "Parallel worker dispatch prepared.",
+			Payload: payload,
+		})
+		m.writeRunArtifact("worker_packet_"+task.ID, packet)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		m.modelRunID++
+		runID := m.modelRunID
+		m.ensureWorkerRunMaps()
+		m.workerRuns[runID] = task.ID
+		m.cancelWorkerRuns[runID] = cancel
+		cmds = append(cmds, m.runWorkerModelCmd(ctx, runID, packet))
+		packets = append(packets, packet)
+	}
+	m.thinking = true
+	m.working.Spinner = spinner.Jump
+	m.streamAt = time.Now()
+	m.status = fmt.Sprintf("running %d worker(s)", len(candidates))
+	m.addSystemNote("Parallel worker dispatch prepared:\n" + renderJSON(packets))
+	return m, tea.Batch(append(cmds, m.working.Tick)...), true
 }
 
 func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
@@ -712,9 +818,11 @@ func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
 	m.streamAt = time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	m.modelRunID++
-	m.activeModelRunID = m.modelRunID
-	m.cancelModel = cancel
-	return m, tea.Batch(m.runWorkerModelCmd(ctx, m.activeModelRunID, packet), m.working.Tick), true
+	runID := m.modelRunID
+	m.ensureWorkerRunMaps()
+	m.workerRuns[runID] = task.ID
+	m.cancelWorkerRuns[runID] = cancel
+	return m, tea.Batch(m.runWorkerModelCmd(ctx, runID, packet), m.working.Tick), true
 }
 
 func (m model) runWorkerModelCmd(ctx context.Context, runID int, packet coding.TaskPacket) tea.Cmd {
@@ -747,6 +855,22 @@ func (m model) modelTelemetry(role string, latency time.Duration, rawChars, repa
 		OutputTokens:       usage.OutputTokens,
 		JSONRepairAttempts: repairAttempts,
 	}
+}
+
+func (m *model) ensureWorkerRunMaps() {
+	if m.workerRuns == nil {
+		m.workerRuns = map[int]string{}
+	}
+	if m.cancelWorkerRuns == nil {
+		m.cancelWorkerRuns = map[int]context.CancelFunc{}
+	}
+}
+
+func (m model) workerConcurrency() int {
+	if m.cfg.Workers.Concurrency <= 0 {
+		return 1
+	}
+	return m.cfg.Workers.Concurrency
 }
 
 func (m model) providerNameForRole(role string) string {
@@ -1573,6 +1697,90 @@ func firstRunningTask(tasks []coding.Task) (coding.Task, bool) {
 	return coding.Task{}, false
 }
 
+func parallelRunnableTasks(tasks []coding.Task, limit int) []coding.Task {
+	if limit <= 0 {
+		return nil
+	}
+	done := map[string]bool{}
+	activeOrSelected := map[string]bool{}
+	for _, task := range tasks {
+		if task.Status == coding.TaskStatusDone {
+			done[task.ID] = true
+		}
+		if task.Status == coding.TaskStatusRunning || task.Status == coding.TaskStatusReviewing {
+			for _, path := range task.AllowedPaths {
+				activeOrSelected[normalizeTaskPathForOverlap(path)] = true
+			}
+		}
+	}
+	selected := make([]coding.Task, 0, limit)
+	for _, task := range tasks {
+		if task.Status != coding.TaskStatusPending {
+			continue
+		}
+		if len(task.AllowedPaths) == 0 {
+			continue
+		}
+		if !dependenciesDone(task, done) {
+			continue
+		}
+		if pathsOverlapAny(task.AllowedPaths, activeOrSelected) {
+			continue
+		}
+		selected = append(selected, task)
+		for _, path := range task.AllowedPaths {
+			activeOrSelected[normalizeTaskPathForOverlap(path)] = true
+		}
+		if len(selected) >= limit {
+			break
+		}
+	}
+	return selected
+}
+
+func dependenciesDone(task coding.Task, done map[string]bool) bool {
+	for _, dep := range task.DependsOn {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			continue
+		}
+		if !done[dep] {
+			return false
+		}
+	}
+	return true
+}
+
+func pathsOverlapAny(paths []string, selected map[string]bool) bool {
+	for _, path := range paths {
+		path = normalizeTaskPathForOverlap(path)
+		if path == "" {
+			continue
+		}
+		for selectedPath := range selected {
+			if taskPathsOverlap(path, selectedPath) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func taskPathsOverlap(a, b string) bool {
+	if a == "." || b == "." || a == b {
+		return true
+	}
+	return strings.HasPrefix(a+"/", b+"/") || strings.HasPrefix(b+"/", a+"/")
+}
+
+func normalizeTaskPathForOverlap(path string) string {
+	path = filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+	if path == "/" || path == "" {
+		return "."
+	}
+	return strings.TrimPrefix(path, "./")
+}
+
 func planDoneAfterTask(tasks []coding.Task, doneTaskID string) bool {
 	for _, task := range tasks {
 		if task.ID == doneTaskID {
@@ -1997,7 +2205,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 func (m model) editPlanCommand(raw string) (tea.Model, tea.Cmd, bool) {
 	taskSelector, field, value, ok := splitPlanEditArgs(raw)
 	if !ok {
-		m.addSystemNote("Usage: /plan edit <task> <field> <value>\nFields: title, goal, allowed_paths, forbidden_paths, context_files, skills, verification, checks.")
+		m.addSystemNote("Usage: /plan edit <task> <field> <value>\nFields: title, goal, allowed_paths, forbidden_paths, context_files, skills, depends_on, verification, checks.")
 		m.status = "plan edit usage"
 		return m, nil, true
 	}
@@ -2188,6 +2396,8 @@ func applyPlanTaskEdit(task *coding.Task, field, value string) error {
 		task.ContextFiles = splitPlanEditList(value)
 	case "skill", "skills":
 		task.Skills = splitPlanEditList(value)
+	case "depends", "depends_on", "dependencies":
+		task.DependsOn = splitPlanEditList(value)
 	case "verify", "verification":
 		task.Verification = splitPlanEditList(value)
 	case "checks", "acceptance", "acceptance_checks":
@@ -2326,12 +2536,13 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 			Content: strings.Join([]string{
 				"You are the WeazlCode orchestrator.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
 				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
 				"Every task must include concrete acceptance_checks that can be reviewed against the diff.",
 				"If a discovered skill is directly relevant, include its exact skill name in the task skills array. Otherwise leave skills empty.",
+				"Use depends_on with task ids only when a task must wait for another task; leave it empty for independent work that can run in parallel.",
 				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
 				"If no allowlisted verification applies, leave verification empty.",
 			}, "\n"),
@@ -2350,7 +2561,7 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 			Content: strings.Join([]string{
 				"You repair WeazlCode plan JSON.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for one bounded worker task.",
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
@@ -2454,6 +2665,9 @@ func (m model) taskDetailCommandText(selector string) string {
 	if len(task.Skills) > 0 {
 		fmt.Fprintf(&b, "\nSkills:\n%s", bulletList(task.Skills))
 	}
+	if len(task.DependsOn) > 0 {
+		fmt.Fprintf(&b, "\nDepends on:\n%s", bulletList(task.DependsOn))
+	}
 	if len(task.Verification) > 0 {
 		fmt.Fprintf(&b, "\nVerification:\n%s", bulletList(task.Verification))
 	}
@@ -2551,6 +2765,9 @@ func renderPlan(plan coding.Plan) string {
 			}
 			if len(task.Skills) > 0 {
 				fmt.Fprintf(&b, "\n   skills: %s", strings.Join(task.Skills, ", "))
+			}
+			if len(task.DependsOn) > 0 {
+				fmt.Fprintf(&b, "\n   depends_on: %s", strings.Join(task.DependsOn, ", "))
 			}
 		}
 	}
@@ -2657,6 +2874,7 @@ func (m model) configViewText() string {
 	fmt.Fprintf(&b, "- summarizer: %s\n", m.cfg.ModelRoles.Summarizer)
 	fmt.Fprintf(&b, "\nTools:\nenabled: %t\nauto_execute_safe: %t\nmax_output_chars: %d\nmax_file_bytes: %d\n", m.cfg.Tools.Enabled, m.cfg.Tools.AutoExecute, m.cfg.Tools.MaxOutputChars, m.cfg.Tools.MaxFileBytes)
 	fmt.Fprintf(&b, "\nSkills:\nenabled: %t\npaths: %s\n", m.cfg.Skills.SkillsEnabled(), strings.Join(m.cfg.Skills.Paths, ", "))
+	fmt.Fprintf(&b, "\nWorkers:\nconcurrency: %d\n", m.workerConcurrency())
 	return strings.TrimRight(b.String(), "\n")
 }
 

@@ -48,6 +48,7 @@ func TestPrepareImportedPlanNormalizesProjectPaths(t *testing.T) {
 			ForbiddenPaths:   []string{"/tmp/project/secrets"},
 			ContextFiles:     []string{"/tmp/project/internal/app.go"},
 			Skills:           []string{"go-tests", "go-tests", ""},
+			DependsOn:        []string{"task-0", "task-0", ""},
 			Verification:     []string{"go test ./..."},
 			AcceptanceChecks: []AcceptanceCheck{{Description: "done"}},
 		}},
@@ -59,6 +60,9 @@ func TestPrepareImportedPlanNormalizesProjectPaths(t *testing.T) {
 	}
 	if len(task.Skills) != 1 || task.Skills[0] != "go-tests" {
 		t.Fatalf("skills = %#v", task.Skills)
+	}
+	if len(task.DependsOn) != 1 || task.DependsOn[0] != "task-0" {
+		t.Fatalf("depends_on = %#v", task.DependsOn)
 	}
 }
 

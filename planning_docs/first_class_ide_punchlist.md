@@ -213,14 +213,14 @@ Goal: make reusable coding knowledge discoverable and auditable before injecting
 
 Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditable artifacts, and frontier review.
 
-- [ ] Add task dependency metadata so only independent tasks can run together.
-- [ ] Add configurable worker concurrency with a conservative default.
-- [ ] Replace single active model-run state with per-task worker run state.
-- [ ] Dispatch multiple approved pending tasks concurrently when their allowed paths do not overlap.
-- [ ] Persist worker telemetry and artifacts per task without shared-state collisions.
-- [ ] Add reviewer queue support for completed worker tasks.
-- [ ] Add TUI progress for multiple running/reviewing tasks.
-- [ ] Add cancellation for one task or all active worker runs.
+- [x] Add task dependency metadata so only independent tasks can run together.
+- [x] Add configurable worker concurrency with a conservative default.
+- [x] Replace single active model-run state with per-task worker run state.
+- [x] Dispatch multiple approved pending tasks concurrently when their allowed paths do not overlap.
+- [x] Persist worker telemetry and artifacts per task without shared-state collisions.
+- [x] Add reviewer queue support for completed worker tasks.
+- [x] Add TUI progress for multiple running/reviewing tasks.
+- [x] Add cancellation for one task or all active worker runs.
 - [ ] Smoke-test parallel dispatch against a vLLM-compatible endpoint.
 
 ## Later Extensions
@@ -233,6 +233,6 @@ Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditab
 
 ## Immediate Next Build Order
 
-1. Start Phase 6 by modeling per-task worker run state and concurrency limits.
-2. Add parallel dispatch for independent pending tasks with non-overlapping allowed paths.
-3. Smoke-test parallel dispatch against a vLLM-compatible endpoint.
+1. Run a live Phase 6 `/run-workers` smoke against a vLLM-compatible endpoint.
+2. Tune task scheduling and progress display from real multi-task repo runs.
+3. Start the next phase after parallel worker reliability is smoke-tested.

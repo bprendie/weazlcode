@@ -30,6 +30,7 @@ func TestPlanRoundTrip(t *testing.T) {
 				AllowedPaths:   []string{"internal/storage"},
 				ContextFiles:   []string{"internal/storage/storage.go"},
 				Skills:         []string{"go-tests"},
+				DependsOn:      []string{"task-0"},
 				Verification:   []string{"go test ./..."},
 				ForbiddenPaths: []string{"cmd"},
 				AcceptanceChecks: []coding.AcceptanceCheck{
@@ -57,6 +58,9 @@ func TestPlanRoundTrip(t *testing.T) {
 	}
 	if len(got.Tasks[0].Skills) != 1 || got.Tasks[0].Skills[0] != "go-tests" {
 		t.Fatalf("skills = %#v", got.Tasks[0].Skills)
+	}
+	if len(got.Tasks[0].DependsOn) != 1 || got.Tasks[0].DependsOn[0] != "task-0" {
+		t.Fatalf("depends_on = %#v", got.Tasks[0].DependsOn)
 	}
 }
 

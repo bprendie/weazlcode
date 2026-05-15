@@ -72,6 +72,11 @@ func (m model) handleEnter() (tea.Model, tea.Cmd) {
 		return m.approveToolCalls()
 	case modeChat, modeIDEView:
 		if m.thinking {
+			prompt := strings.TrimSpace(m.chatPrompt())
+			if strings.HasPrefix(prompt, "/cancel") {
+				updated, cmd, _ := m.handleSlashCommand(prompt)
+				return updated, cmd
+			}
 			return m, nil
 		}
 		prompt := strings.TrimSpace(m.chatPrompt())

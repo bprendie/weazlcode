@@ -62,5 +62,8 @@
       "/home/user/.codex/skills",
       "/home/user/.weazlcode/skills"
     ]
+  },
+  "workers": {
+    "concurrency": 2
   }
 }

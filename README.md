@@ -19,6 +19,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 4 of the IDE architectur
 - LSP Foundation: Go-first language server support with diagnostics, symbols, and definitions fed directly into task packets.
 - Async TUI: Command palettes, diff views, and diagnostics. Async plan/worker/reviewer spinners keep the IDE view alive while long-running models grind in the background.
 - Skills Surface: Project and global `SKILL.md` discovery, `/skills` inspection, planner skill selection, and explicit task-level skill attachment.
+- Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, and per-task worker cancellation.
 
 ## Defaults
 
@@ -91,7 +92,7 @@ weazlcode init
 
 Slash commands drive the IDE. Hit `/` to open the palette.
 
-- Workflow: `/plan draft`, `/plan generate`, `/run-task`, `/run-worker`, `/run-reviewer`, `/commit-message`, `/export-run`.
+- Workflow: `/plan draft`, `/plan generate`, `/run-task`, `/run-worker`, `/run-workers`, `/run-reviewer`, `/commit-message`, `/export-run`.
 - Views: `/diff`, `/outputs`, `/files`, `/preview`, `/skills`, `/diagnostics`, `/symbols`.
 - Control: `ctrl+t` trims context, `ctrl+u` nukes active session context, `ctrl+s` saves workspace, and `ctrl+r` / `ctrl+w` opens the workspace picker.
 - Mouse/Copy: `ctrl+m` toggles between terminal copy mode and TUI mouse-scroll mode.

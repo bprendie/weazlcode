@@ -13,6 +13,9 @@ func TestDefaultModelRoles(t *testing.T) {
 	if !cfg.Skills.SkillsEnabled() || len(cfg.Skills.Paths) == 0 {
 		t.Fatalf("Skills = %#v, want enabled defaults", cfg.Skills)
 	}
+	if cfg.Workers.Concurrency != 2 {
+		t.Fatalf("Workers.Concurrency = %d, want 2", cfg.Workers.Concurrency)
+	}
 }
 
 func TestModelRolesDefaultToActiveProvider(t *testing.T) {
@@ -28,6 +31,9 @@ func TestModelRolesDefaultToActiveProvider(t *testing.T) {
 	}
 	if !cfg.Skills.SkillsEnabled() || len(cfg.Skills.Paths) == 0 {
 		t.Fatalf("Skills = %#v, want default paths", cfg.Skills)
+	}
+	if cfg.Workers.Concurrency != 2 {
+		t.Fatalf("Workers.Concurrency = %d, want 2", cfg.Workers.Concurrency)
 	}
 }
 

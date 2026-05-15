@@ -17,6 +17,7 @@ type Config struct {
 	UI             UI                  `json:"ui"`
 	Tools          Tools               `json:"tools"`
 	Skills         Skills              `json:"skills"`
+	Workers        Workers             `json:"workers"`
 }
 
 type ModelRoles struct {
@@ -57,6 +58,10 @@ type Tools struct {
 type Skills struct {
 	Enabled *bool    `json:"enabled,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
+}
+
+type Workers struct {
+	Concurrency int `json:"concurrency"`
 }
 
 func Load() (Config, string, error) {
@@ -140,6 +145,9 @@ func Default() Config {
 			Enabled: boolPtr(true),
 			Paths:   defaultSkillPaths(),
 		},
+		Workers: Workers{
+			Concurrency: 2,
+		},
 	}
 }
 
@@ -200,6 +208,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.Skills.Enabled == nil {
 		c.Skills.Enabled = def.Skills.Enabled
+	}
+	if c.Workers.Concurrency <= 0 {
+		c.Workers.Concurrency = def.Workers.Concurrency
 	}
 }
 
