@@ -448,6 +448,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancelModel = nil
 		m.thinking = m.hasModelWork()
 		if msg.err != nil {
+			m.recordReviewerModelError(msg.err, &msg.telemetry)
 			m.addSystemNote("Reviewer model error: " + msg.err.Error())
 			m.status = "reviewer run failed"
 			return m, nil

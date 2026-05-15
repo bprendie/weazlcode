@@ -1514,11 +1514,19 @@ func (m model) runReviewerModel() (tea.Model, tea.Cmd, bool) {
 	m.working.Spinner = spinner.Jump
 	m.status = "running reviewer"
 	m.streamAt = time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), m.reviewerRequestTimeout())
 	m.modelRunID++
 	m.activeModelRunID = m.modelRunID
 	m.cancelModel = cancel
 	return m, tea.Batch(m.runReviewerModelCmd(ctx, m.activeModelRunID, input), m.working.Tick), true
+}
+
+func (m model) reviewerRequestTimeout() time.Duration {
+	timeout := m.workerRequestTimeout()
+	if timeout > 2*time.Minute {
+		return 2 * time.Minute
+	}
+	return timeout
 }
 
 func (m model) runReviewerModelCmd(ctx context.Context, runID int, input coding.ReviewerInput) tea.Cmd {
@@ -1538,8 +1546,37 @@ func (m model) runReviewerModelCmd(ctx context.Context, runID int, input coding.
 }
 
 func (m model) generateReviewVerdictJSON(ctx context.Context, input coding.ReviewerInput) (string, llm.Usage, error) {
-	client := llm.New(m.cfg.ProviderForRole("reviewer"))
+	client := llm.NewWithTimeout(m.cfg.ProviderForRole("reviewer"), m.reviewerRequestTimeout())
 	return client.CompleteWithUsage(ctx, reviewerVerdictMessages(input), 2048)
+}
+
+func (m model) recordReviewerModelError(err error, telemetry *modelTelemetry) {
+	plan, ok, loadErr := m.store.LatestPlan(m.session.ID)
+	if loadErr != nil || !ok {
+		return
+	}
+	task, ok := firstReviewingTask(plan.Tasks)
+	if !ok {
+		return
+	}
+	if telemetry != nil {
+		payload, _ := json.Marshal(telemetry)
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "reviewer_model",
+			Message: fmt.Sprintf("%s/%s in %dms", telemetry.Provider, telemetry.Model, telemetry.LatencyMS),
+			Payload: payload,
+		})
+	}
+	eventType := "reviewer_error"
+	if strings.Contains(strings.ToLower(err.Error()), "timeout") || strings.Contains(strings.ToLower(err.Error()), "deadline exceeded") {
+		eventType = "reviewer_timeout"
+	}
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    eventType,
+		Message: err.Error(),
+	})
 }
 
 func reviewerVerdictMessages(input coding.ReviewerInput) []llm.ChatMessage {

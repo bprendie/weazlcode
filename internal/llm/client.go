@@ -52,10 +52,19 @@ type Client struct {
 	tools    []map[string]any
 }
 
+const defaultHTTPTimeout = 5 * time.Minute
+
 func New(provider config.Provider) Client {
+	return NewWithTimeout(provider, defaultHTTPTimeout)
+}
+
+func NewWithTimeout(provider config.Provider, timeout time.Duration) Client {
+	if timeout <= 0 {
+		timeout = defaultHTTPTimeout
+	}
 	return Client{
 		provider: provider,
-		http:     &http.Client{Timeout: 0},
+		http:     &http.Client{Timeout: timeout},
 	}
 }
 
