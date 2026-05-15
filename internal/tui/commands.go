@@ -279,6 +279,7 @@ func slashHelp() string {
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/plan generate <request> - ask orchestrator role for a strict draft plan",
+		"/plan replan [guidance] - ask orchestrator role to replace blocked/pending work with a fresh draft plan",
 		"/plan edit <task> <field> <value> - edit draft task fields, including skills, before approval",
 		"/plan validate - check draft task specificity before approval",
 		"/plan import <json> - validate and store a structured plan JSON payload",
@@ -310,7 +311,7 @@ func commandPaletteText() string {
 		Title    string
 		Commands []string
 	}{
-		{"Plan", []string{"/plan", "/plan generate <request>", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
+		{"Plan", []string{"/plan", "/plan generate <request>", "/plan replan [guidance]", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/run-workers", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
 		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
@@ -649,6 +650,12 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		})
 	}
 	if strings.TrimSpace(patch.Blocker) != "" {
+		events, _ := m.store.TaskEvents(task.ID)
+		if err := m.restoreTaskBaseline(task, events, "worker blocker"); err != nil {
+			m.addSystemNote("Worker cleanup error: " + err.Error())
+			m.status = "worker cleanup failed"
+			return m, nil, true
+		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Worker patch error: " + err.Error())
 			m.status = "worker patch failed"
@@ -1696,6 +1703,11 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			return m, nil, true
 		}
 		attempt := repairAttemptCount(events) + 1
+		if err := m.restoreTaskBaseline(task, events, "review needs fix"); err != nil {
+			m.addSystemNote("Review cleanup error: " + err.Error())
+			m.status = "review cleanup failed"
+			return m, nil, true
+		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
 			m.status = "review failed"
@@ -1734,6 +1746,12 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		m.addSystemNote("Reviewer requested focused repair:\n" + renderJSON(verdict))
 		m.status = "repair requested"
 	case coding.ReviewBlocked:
+		events, _ := m.store.TaskEvents(task.ID)
+		if err := m.restoreTaskBaseline(task, events, "review blocked"); err != nil {
+			m.addSystemNote("Review cleanup error: " + err.Error())
+			m.status = "review cleanup failed"
+			return m, nil, true
+		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
 			m.status = "review failed"
@@ -1981,6 +1999,45 @@ func (m model) taskBaselineDiff(task coding.Task, baseline taskBaselinePayload) 
 		parts = append(parts, renderFullFileDiff(file.Path, file.Exists, file.Content, exists, current))
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func (m model) restoreTaskBaseline(task coding.Task, events []coding.TaskEvent, reason string) error {
+	baseline, ok := latestTaskBaseline(events)
+	if !ok || len(baseline.Files) == 0 {
+		return nil
+	}
+	var restored []string
+	for _, file := range baseline.Files {
+		if err := coding.ValidatePatchPaths([]string{file.Path}, taskAllowedPaths(task), task.ForbiddenPaths); err != nil {
+			return err
+		}
+		fullPath := filepath.Join(m.project.Root, filepath.FromSlash(file.Path))
+		if file.Exists {
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(fullPath, []byte(file.Content), 0o644); err != nil {
+				return err
+			}
+		} else if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		restored = append(restored, file.Path)
+	}
+	payload, _ := json.Marshal(struct {
+		Reason string   `json:"reason"`
+		Paths  []string `json:"paths"`
+	}{
+		Reason: reason,
+		Paths:  restored,
+	})
+	_, err := m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "output_cleanup",
+		Message: fmt.Sprintf("Restored %d allowed path(s) to task baseline after %s.", len(restored), reason),
+		Payload: payload,
+	})
+	return err
 }
 
 func (m model) readTaskFile(path string) (string, bool, error) {
@@ -2645,6 +2702,10 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 		request := strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0]))
 		return m.generatePlanCommand(request)
 	}
+	if len(args) > 0 && strings.ToLower(args[0]) == "replan" {
+		guidance := strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0]))
+		return m.replanCommand(guidance)
+	}
 	if len(args) > 0 && strings.ToLower(args[0]) == "edit" {
 		return m.editPlanCommand(strings.TrimSpace(strings.TrimPrefix(rawArgs, args[0])))
 	}
@@ -2986,6 +3047,35 @@ func (m model) generatePlanCommand(request string) (tea.Model, tea.Cmd, bool) {
 	return m, tea.Batch(m.generatePlanCmd(ctx, m.activeModelRunID, request), m.working.Tick), true
 }
 
+func (m model) replanCommand(guidance string) (tea.Model, tea.Cmd, bool) {
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		m.addSystemNote("Plan replan error: " + err.Error())
+		m.status = "plan replan failed"
+		return m, nil, true
+	}
+	if !ok {
+		m.addSystemNote("No plan. Use `/plan generate <request>` first.")
+		m.status = "no plan"
+		return m, nil, true
+	}
+	request, err := m.replanRequest(plan, guidance)
+	if err != nil {
+		m.addSystemNote("Plan replan error: " + err.Error())
+		m.status = "plan replan failed"
+		return m, nil, true
+	}
+	m.thinking = true
+	m.working.Spinner = spinner.Jump
+	m.status = "replanning"
+	m.streamAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	m.modelRunID++
+	m.activeModelRunID = m.modelRunID
+	m.cancelModel = cancel
+	return m, tea.Batch(m.generatePlanCmd(ctx, m.activeModelRunID, request), m.working.Tick), true
+}
+
 func (m model) generatePlanCmd(ctx context.Context, runID int, request string) tea.Cmd {
 	return func() tea.Msg {
 		raw, err := m.generatePlanJSON(ctx, request)
@@ -3095,6 +3185,90 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 			Content: strings.TrimSpace(contextText.String()) + "\n\nUser request:\n" + strings.TrimSpace(request),
 		},
 	}
+}
+
+func (m model) replanRequest(plan coding.Plan, guidance string) (string, error) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Replan the unfinished work for this existing WeazlCode plan.\n")
+	fmt.Fprintf(&b, "Original plan title: %s\n", plan.Title)
+	if strings.TrimSpace(plan.Summary) != "" {
+		fmt.Fprintf(&b, "Original summary: %s\n", strings.TrimSpace(plan.Summary))
+	}
+	if strings.TrimSpace(guidance) != "" {
+		fmt.Fprintf(&b, "\nUser replan guidance:\n%s\n", strings.TrimSpace(guidance))
+	}
+	b.WriteString("\nCompleted tasks are already done; do not repeat them except as context for later wiring tasks:\n")
+	completed := 0
+	for _, task := range plan.Tasks {
+		if task.Status != coding.TaskStatusDone {
+			continue
+		}
+		completed++
+		fmt.Fprintf(&b, "- %s (%s): %s\n", task.ID, task.Title, task.Goal)
+	}
+	if completed == 0 {
+		b.WriteString("- none\n")
+	}
+	b.WriteString("\nBlocked tasks and failure evidence; replace these with better-scoped tasks or omit impossible work:\n")
+	blocked := 0
+	for _, task := range plan.Tasks {
+		if task.Status != coding.TaskStatusBlocked {
+			continue
+		}
+		blocked++
+		fmt.Fprintf(&b, "- %s (%s): %s\n", task.ID, task.Title, task.Goal)
+		events, err := m.store.TaskEvents(task.ID)
+		if err != nil {
+			return "", err
+		}
+		for _, event := range latestPlanningRelevantEvents(events, 5) {
+			fmt.Fprintf(&b, "  - %s: %s\n", event.Type, strings.TrimSpace(event.Message))
+		}
+	}
+	if blocked == 0 {
+		b.WriteString("- none\n")
+	}
+	b.WriteString("\nPending tasks from the old plan; keep only tasks that still make sense after accounting for completed and blocked work:\n")
+	pending := 0
+	for _, task := range plan.Tasks {
+		if task.Status != coding.TaskStatusPending {
+			continue
+		}
+		pending++
+		fmt.Fprintf(&b, "- %s (%s): %s\n  allowed_paths: %s\n  depends_on: %s\n", task.ID, task.Title, task.Goal, strings.Join(task.AllowedPaths, ", "), strings.Join(task.DependsOn, ", "))
+	}
+	if pending == 0 {
+		b.WriteString("- none\n")
+	}
+	b.WriteString("\nReturn a fresh draft plan containing only remaining useful work. Keep tasks small for the configured worker. Do not include tasks that require extracting code that does not exist. If a dark theme or design task is needed, specify concrete readable color goals instead of strict mathematical inversion.")
+	return b.String(), nil
+}
+
+func latestPlanningRelevantEvents(events []coding.TaskEvent, limit int) []coding.TaskEvent {
+	if limit <= 0 {
+		limit = 5
+	}
+	relevant := map[string]bool{
+		"worker_blocker":    true,
+		"worker_error":      true,
+		"worker_timeout":    true,
+		"worker_json_error": true,
+		"worker_rejected":   true,
+		"reviewer_verdict":  true,
+		"repair_requested":  true,
+		"repair_limit":      true,
+		"review_guardrail":  true,
+	}
+	var out []coding.TaskEvent
+	for i := len(events) - 1; i >= 0 && len(out) < limit; i-- {
+		if relevant[events[i].Type] {
+			out = append(out, events[i])
+		}
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 func (m model) planReferencedFilePreviews(request string) string {

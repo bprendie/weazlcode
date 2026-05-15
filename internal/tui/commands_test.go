@@ -844,6 +844,56 @@ func TestRunParallelWorkersStartsIndependentTasks(t *testing.T) {
 	}
 }
 
+func TestPlanReplanStartsAsyncWithBlockedEvidence(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Replan me","summary":"Original work","tasks":[{"id":"task-a","title":"Done","goal":"Already completed.","allowed_paths":["done.css"]},{"id":"task-b","title":"Blocked","goal":"Extract JavaScript that may not exist.","allowed_paths":["app.js"]},{"id":"task-c","title":"Pending","goal":"Continue useful CSS extraction.","allowed_paths":["next.css"],"depends_on":["task-b"]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	if err := m.store.UpdateTaskStatus("task-a", coding.TaskStatusDone); err != nil {
+		t.Fatalf("UpdateTaskStatus done: %v", err)
+	}
+	if err := m.store.UpdateTaskStatus("task-b", coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus blocked: %v", err)
+	}
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: "task-b", Type: "worker_blocker", Message: "No JavaScript code exists in index.html to extract."}); err != nil {
+		t.Fatalf("AddTaskEvent: %v", err)
+	}
+	plan, ok, err = m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found after updates")
+	}
+	request, err := m.replanRequest(plan, "keep the modular CSS direction")
+	if err != nil {
+		t.Fatalf("replanRequest: %v", err)
+	}
+	for _, want := range []string{"Already completed", "No JavaScript code exists", "keep the modular CSS direction", "Continue useful CSS extraction"} {
+		if !strings.Contains(request, want) {
+			t.Fatalf("request missing %q:\n%s", want, request)
+		}
+	}
+	updated, cmd, handled := m.handleSlashCommand("/plan replan keep the modular CSS direction")
+	if !handled {
+		t.Fatal("plan replan handled = false")
+	}
+	got := updated.(model)
+	if cmd == nil || got.status != "replanning" {
+		t.Fatalf("cmd/status = %v/%q, want async replanning", cmd, got.status)
+	}
+}
+
 func TestParallelRunnableTasksRespectsDependenciesAndOverlap(t *testing.T) {
 	tasks := []coding.Task{
 		{ID: "done", Status: coding.TaskStatusDone, AllowedPaths: []string{"README.md"}},
@@ -1146,7 +1196,7 @@ func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 4 || events[3].Type != "worker_blocker" {
+	if len(events) != 5 || events[3].Type != "output_cleanup" || events[4].Type != "worker_blocker" {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -1741,7 +1791,7 @@ func TestReviewApproveIgnoresDiffOutsideCurrentTaskScope(t *testing.T) {
 }
 
 func TestReviewNeedsFixShorthandRequestsRepair(t *testing.T) {
-	m, _ := commandTestModelWithReviewingTask(t)
+	m, root := commandTestModelWithReviewingTask(t)
 	updated, _, handled := m.handleSlashCommand(`/review needs-fix missing docs;;tests not run`)
 	if !handled {
 		t.Fatal("review handled = false")
@@ -1763,6 +1813,13 @@ func TestReviewNeedsFixShorthandRequestsRepair(t *testing.T) {
 	}
 	if events[len(events)-1].Type != "repair_requested" || !strings.Contains(string(events[len(events)-1].Payload), "tests not run") {
 		t.Fatalf("events = %#v", events)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "old\n" {
+		t.Fatalf("README was not restored after needs-fix: %q", data)
 	}
 }
 
@@ -1788,7 +1845,7 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 7 || events[6].Type != "repair_requested" {
+	if len(events) != 8 || events[6].Type != "output_cleanup" || events[7].Type != "repair_requested" {
 		t.Fatalf("events = %#v", events)
 	}
 	updated, _, handled = m.handleSlashCommand("/run-task")
@@ -1810,11 +1867,11 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 9 || events[7].Type != "task_baseline" || events[8].Type != "repair_start" {
+	if len(events) != 10 || events[8].Type != "task_baseline" || events[9].Type != "repair_start" {
 		t.Fatalf("events = %#v", events)
 	}
-	if !strings.Contains(string(events[8].Payload), "Repair focus") || !strings.Contains(string(events[8].Payload), "Use the requested wording only") {
-		t.Fatalf("repair payload = %s", events[8].Payload)
+	if !strings.Contains(string(events[9].Payload), "Repair focus") || !strings.Contains(string(events[9].Payload), "Use the requested wording only") {
+		t.Fatalf("repair payload = %s", events[9].Payload)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
 	for _, want := range []string{"repair_request", "repair_packet"} {
