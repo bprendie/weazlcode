@@ -53,5 +53,14 @@
     ],
     "max_output_chars": 12000,
     "max_file_bytes": 1048576
+  },
+  "skills": {
+    "enabled": true,
+    "paths": [
+      ".weazlcode/skills",
+      ".agents/skills",
+      "/home/user/.codex/skills",
+      "/home/user/.weazlcode/skills"
+    ]
   }
 }

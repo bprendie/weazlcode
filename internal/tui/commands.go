@@ -53,6 +53,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("models", m.modelRolesText())
 	case "tools":
 		m.setIDEView("tools", m.toolsViewText())
+	case "skills":
+		m.setIDEView("skills", m.skillsViewText())
 	case "config":
 		m.setIDEView("config", m.configViewText())
 	case "diff":
@@ -206,6 +208,7 @@ func slashHelp() string {
 		"/project - show active project",
 		"/models - show model role mapping",
 		"/tools - list enabled tools",
+		"/skills - list discovered skills",
 		"/config - show current local configuration summary",
 		"/diff - show current git diff",
 		"/outputs - show recent task events and tool outputs",
@@ -227,7 +230,7 @@ func slashHelp() string {
 		"/plan - show latest plan",
 		"/plan draft <title> - create a draft plan with one seed task",
 		"/plan generate <request> - ask orchestrator role for a strict draft plan",
-		"/plan edit <task> <field> <value> - edit draft task fields before approval",
+		"/plan edit <task> <field> <value> - edit draft task fields, including skills, before approval",
 		"/plan validate - check draft task specificity before approval",
 		"/plan import <json> - validate and store a structured plan JSON payload",
 		"/tasks - list latest plan tasks",
@@ -261,6 +264,7 @@ func commandPaletteText() string {
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
 		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
+		{"Skills", []string{"/skills"}},
 		{"Git", []string{"/diff", "/commit-message", "/commit yes"}},
 		{"Session", []string{"/chat", "/cancel", "/sessions", "/workspaces", "/new", "/clear", "/trim", "/copy"}},
 	}
@@ -934,6 +938,10 @@ func (m model) runTaskVerification(task coding.Task) ([]verificationResult, erro
 func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	diagnostics := m.codingDiagnostics()
 	allowedTools := []string{"read_file", "read_file_range", "search_files", "apply_patch"}
+	skills, err := m.skillContexts(task.Skills)
+	if err != nil {
+		return coding.TaskPacket{}, err
+	}
 	return coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
 		DefaultAllowed: []string{
@@ -942,7 +950,29 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 		DefaultTools:  allowedTools,
 		DefaultVerify: m.defaultVerificationCommands(),
 		Diagnostics:   diagnostics,
+		Skills:        skills,
 	})
+}
+
+func (m model) skillContexts(names []string) ([]coding.SkillContext, error) {
+	if !m.cfg.Skills.SkillsEnabled() || len(names) == 0 {
+		return nil, nil
+	}
+	skills, err := project.LoadSkillContents(m.project.Root, m.cfg.Skills.Paths, names, 12000)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]coding.SkillContext, 0, len(skills))
+	for _, skill := range skills {
+		out = append(out, coding.SkillContext{
+			Name:        skill.Name,
+			Description: skill.Description,
+			Path:        skill.Path,
+			Content:     skill.Content,
+			Truncated:   skill.Truncated,
+		})
+	}
+	return out, nil
 }
 
 func (m model) codingDiagnostics() []coding.Diagnostic {
@@ -1967,7 +1997,7 @@ func (m model) handlePlanCommand(args []string, rawArgs string) (tea.Model, tea.
 func (m model) editPlanCommand(raw string) (tea.Model, tea.Cmd, bool) {
 	taskSelector, field, value, ok := splitPlanEditArgs(raw)
 	if !ok {
-		m.addSystemNote("Usage: /plan edit <task> <field> <value>\nFields: title, goal, allowed_paths, forbidden_paths, context_files, verification, checks.")
+		m.addSystemNote("Usage: /plan edit <task> <field> <value>\nFields: title, goal, allowed_paths, forbidden_paths, context_files, skills, verification, checks.")
 		m.status = "plan edit usage"
 		return m, nil, true
 	}
@@ -2156,6 +2186,8 @@ func applyPlanTaskEdit(task *coding.Task, field, value string) error {
 		task.ForbiddenPaths = splitPlanEditList(value)
 	case "context", "context_files":
 		task.ContextFiles = splitPlanEditList(value)
+	case "skill", "skills":
+		task.Skills = splitPlanEditList(value)
 	case "verify", "verification":
 		task.Verification = splitPlanEditList(value)
 	case "checks", "acceptance", "acceptance_checks":
@@ -2257,6 +2289,7 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 	instructions, _, _ := project.LoadInstructions(m.project.Root)
 	memories, _ := m.store.ProjectMemories(m.project.Root, 10)
 	commands := project.DiscoverCommands(m.project.Root)
+	skills, _ := project.DiscoverSkills(m.project.Root, m.cfg.Skills.Paths)
 	var contextText strings.Builder
 	fmt.Fprintf(&contextText, "Project root: %s\n", m.project.Root)
 	if len(m.project.Languages) > 0 {
@@ -2277,17 +2310,28 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 			fmt.Fprintf(&contextText, "- %s: %s\n", memory.Key, memory.Value)
 		}
 	}
+	if m.cfg.Skills.SkillsEnabled() && len(skills) > 0 {
+		contextText.WriteString("\nDiscovered skills:\n")
+		for _, skill := range skills {
+			fmt.Fprintf(&contextText, "- %s", skill.Name)
+			if strings.TrimSpace(skill.Description) != "" {
+				fmt.Fprintf(&contextText, ": %s", skill.Description)
+			}
+			fmt.Fprintf(&contextText, " [%s]\n", skill.Source)
+		}
+	}
 	return []llm.ChatMessage{
 		{
 			Role: "system",
 			Content: strings.Join([]string{
 				"You are the WeazlCode orchestrator.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
 				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
 				"Every task must include concrete acceptance_checks that can be reviewed against the diff.",
+				"If a discovered skill is directly relevant, include its exact skill name in the task skills array. Otherwise leave skills empty.",
 				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
 				"If no allowlisted verification applies, leave verification empty.",
 			}, "\n"),
@@ -2306,7 +2350,7 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 			Content: strings.Join([]string{
 				"You repair WeazlCode plan JSON.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for one bounded worker task.",
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
@@ -2407,6 +2451,9 @@ func (m model) taskDetailCommandText(selector string) string {
 	if len(task.ContextFiles) > 0 {
 		fmt.Fprintf(&b, "\nContext files:\n%s", bulletList(task.ContextFiles))
 	}
+	if len(task.Skills) > 0 {
+		fmt.Fprintf(&b, "\nSkills:\n%s", bulletList(task.Skills))
+	}
 	if len(task.Verification) > 0 {
 		fmt.Fprintf(&b, "\nVerification:\n%s", bulletList(task.Verification))
 	}
@@ -2502,6 +2549,9 @@ func renderPlan(plan coding.Plan) string {
 					fmt.Fprintf(&b, "\n   - %s", label)
 				}
 			}
+			if len(task.Skills) > 0 {
+				fmt.Fprintf(&b, "\n   skills: %s", strings.Join(task.Skills, ", "))
+			}
 		}
 	}
 	return b.String()
@@ -2559,6 +2609,34 @@ func (m model) toolsViewText() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func (m model) skillsViewText() string {
+	var b strings.Builder
+	b.WriteString("Skills:\n")
+	if !m.cfg.Skills.SkillsEnabled() {
+		b.WriteString("disabled in config")
+		return b.String()
+	}
+	if len(m.cfg.Skills.Paths) > 0 {
+		fmt.Fprintf(&b, "precedence: %s\n\n", strings.Join(m.cfg.Skills.Paths, " > "))
+	}
+	skills, err := project.DiscoverSkills(m.project.Root, m.cfg.Skills.Paths)
+	if err != nil {
+		return "Skills error: " + err.Error()
+	}
+	if len(skills) == 0 {
+		b.WriteString("none discovered")
+		return b.String()
+	}
+	for _, skill := range skills {
+		fmt.Fprintf(&b, "- %s [%s]\n", skill.Name, skill.Source)
+		if strings.TrimSpace(skill.Description) != "" {
+			fmt.Fprintf(&b, "  %s\n", skill.Description)
+		}
+		fmt.Fprintf(&b, "  path: %s\n", skill.Path)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m model) configViewText() string {
 	active := m.cfg.Active()
 	var b strings.Builder
@@ -2578,6 +2656,7 @@ func (m model) configViewText() string {
 	fmt.Fprintf(&b, "- reviewer: %s\n", m.cfg.ModelRoles.Reviewer)
 	fmt.Fprintf(&b, "- summarizer: %s\n", m.cfg.ModelRoles.Summarizer)
 	fmt.Fprintf(&b, "\nTools:\nenabled: %t\nauto_execute_safe: %t\nmax_output_chars: %d\nmax_file_bytes: %d\n", m.cfg.Tools.Enabled, m.cfg.Tools.AutoExecute, m.cfg.Tools.MaxOutputChars, m.cfg.Tools.MaxFileBytes)
+	fmt.Fprintf(&b, "\nSkills:\nenabled: %t\npaths: %s\n", m.cfg.Skills.SkillsEnabled(), strings.Join(m.cfg.Skills.Paths, ", "))
 	return strings.TrimRight(b.String(), "\n")
 }
 

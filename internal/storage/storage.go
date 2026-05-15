@@ -170,6 +170,7 @@ func (s *Store) Migrate() error {
 			allowed_paths text not null default '[]',
 			forbidden_paths text not null default '[]',
 			context_files text not null default '[]',
+			skills text not null default '[]',
 			verification text not null default '[]',
 			acceptance_checks text not null default '[]',
 			created_at datetime not null default current_timestamp,
@@ -213,6 +214,9 @@ func (s *Store) Migrate() error {
 		return err
 	}
 	if err := s.ensureColumn("workspace_saves", "through_message_id", "integer not null default 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("tasks", "skills", "text not null default '[]'"); err != nil {
 		return err
 	}
 	return nil

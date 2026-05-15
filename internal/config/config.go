@@ -16,6 +16,7 @@ type Config struct {
 	Database       Database            `json:"database"`
 	UI             UI                  `json:"ui"`
 	Tools          Tools               `json:"tools"`
+	Skills         Skills              `json:"skills"`
 }
 
 type ModelRoles struct {
@@ -51,6 +52,11 @@ type Tools struct {
 	WorkspaceRoots  []string `json:"workspace_roots,omitempty"`
 	MaxOutputChars  int      `json:"max_output_chars,omitempty"`
 	MaxFileBytes    int64    `json:"max_file_bytes,omitempty"`
+}
+
+type Skills struct {
+	Enabled *bool    `json:"enabled,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -130,6 +136,10 @@ func Default() Config {
 			MaxOutputChars: 12000,
 			MaxFileBytes:   1024 * 1024,
 		},
+		Skills: Skills{
+			Enabled: boolPtr(true),
+			Paths:   defaultSkillPaths(),
+		},
 	}
 }
 
@@ -185,6 +195,12 @@ func (c *Config) withDefaults() {
 	if c.Tools.MaxFileBytes <= 0 {
 		c.Tools.MaxFileBytes = def.Tools.MaxFileBytes
 	}
+	if len(c.Skills.Paths) == 0 {
+		c.Skills.Paths = def.Skills.Paths
+	}
+	if c.Skills.Enabled == nil {
+		c.Skills.Enabled = def.Skills.Enabled
+	}
 }
 
 func (c *Config) ProviderForRole(role string) Provider {
@@ -209,8 +225,25 @@ func (ui UI) MarkdownEnabled() bool {
 	return ui.RenderMarkdown == nil || *ui.RenderMarkdown
 }
 
+func (s Skills) SkillsEnabled() bool {
+	return s.Enabled == nil || *s.Enabled
+}
+
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func defaultSkillPaths() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return []string{".weazlcode/skills", ".agents/skills"}
+	}
+	return []string{
+		".weazlcode/skills",
+		".agents/skills",
+		filepath.Join(home, ".codex", "skills"),
+		filepath.Join(home, ".weazlcode", "skills"),
+	}
 }
 
 func configPath() string {

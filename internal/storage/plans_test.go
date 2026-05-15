@@ -29,6 +29,7 @@ func TestPlanRoundTrip(t *testing.T) {
 				Status:         coding.TaskStatusPending,
 				AllowedPaths:   []string{"internal/storage"},
 				ContextFiles:   []string{"internal/storage/storage.go"},
+				Skills:         []string{"go-tests"},
 				Verification:   []string{"go test ./..."},
 				ForbiddenPaths: []string{"cmd"},
 				AcceptanceChecks: []coding.AcceptanceCheck{
@@ -53,6 +54,9 @@ func TestPlanRoundTrip(t *testing.T) {
 	}
 	if got.Tasks[0].AcceptanceChecks[0].Command != "go test ./..." {
 		t.Fatalf("task = %#v", got.Tasks[0])
+	}
+	if len(got.Tasks[0].Skills) != 1 || got.Tasks[0].Skills[0] != "go-tests" {
+		t.Fatalf("skills = %#v", got.Tasks[0].Skills)
 	}
 }
 

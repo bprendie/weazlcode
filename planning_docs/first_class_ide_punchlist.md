@@ -198,16 +198,41 @@ Goal: make the single-worker loop harder to misuse by tightening setup validatio
 
 ## Later Extensions
 
-- [ ] MCP client support.
-- [ ] Skills discovery.
+## Phase 5: Skills Surface
+
+Goal: make reusable coding knowledge discoverable and auditable before injecting it into planner or worker context.
+
+- [x] Add skill discovery from project, repo, and global skill paths.
+- [x] Add `/skills` TUI view showing discovered skills, source path, and short description.
+- [x] Load selected relevant skills into orchestrator context.
+- [x] Add skill attachment to task packets when explicitly approved.
+- [x] Add skill conflict/precedence rules.
+- [x] Document Phase 5 skill safety rules and smoke criteria.
+
+## Phase 6: Parallel Worker Execution
+
+Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditable artifacts, and frontier review.
+
+- [ ] Add task dependency metadata so only independent tasks can run together.
+- [ ] Add configurable worker concurrency with a conservative default.
+- [ ] Replace single active model-run state with per-task worker run state.
+- [ ] Dispatch multiple approved pending tasks concurrently when their allowed paths do not overlap.
+- [ ] Persist worker telemetry and artifacts per task without shared-state collisions.
+- [ ] Add reviewer queue support for completed worker tasks.
+- [ ] Add TUI progress for multiple running/reviewing tasks.
+- [ ] Add cancellation for one task or all active worker runs.
+- [ ] Smoke-test parallel dispatch against a vLLM-compatible endpoint.
+
+## Later Extensions
+
 - [ ] Hooks before/after tool calls and task completion.
 - [ ] Notifications.
-- [ ] Parallel workers after single-worker reliability is proven.
+- [ ] MCP client support if it becomes useful.
 - [ ] External editor integration.
 - [ ] Debug adapter protocol support.
 
 ## Immediate Next Build Order
 
-1. Regroup on Phase 5 scope now that Phase 4 is implemented and smoke tested.
-2. Decide whether Phase 5 starts with MCP/skills/hooks or with async TUI polish from the Phase 4 smoke notes.
-3. Keep parallel workers deferred until the single-worker loop has more real-repo mileage.
+1. Start Phase 6 by modeling per-task worker run state and concurrency limits.
+2. Add parallel dispatch for independent pending tasks with non-overlapping allowed paths.
+3. Smoke-test parallel dispatch against a vLLM-compatible endpoint.

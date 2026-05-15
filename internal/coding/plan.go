@@ -46,6 +46,7 @@ type Task struct {
 	AllowedPaths     []string          `json:"allowed_paths,omitempty"`
 	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
 	ContextFiles     []string          `json:"context_files,omitempty"`
+	Skills           []string          `json:"skills,omitempty"`
 	Verification     []string          `json:"verification,omitempty"`
 	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks,omitempty"`
 	CreatedAt        time.Time         `json:"created_at"`

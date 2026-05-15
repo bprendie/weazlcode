@@ -25,6 +25,11 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 	}
 	packet, err := BuildTaskPacket(task, ContextPackOptions{
 		ProjectRoot: root,
+		Skills: []SkillContext{{
+			Name:    "go-tests",
+			Path:    "/skills/go-tests/SKILL.md",
+			Content: "Use focused tests.",
+		}},
 		LineRangeByFile: map[string]LineRange{
 			"internal/file.go": {StartLine: 2, EndLine: 3},
 		},
@@ -40,6 +45,9 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 	}
 	if packet.ContextPolicy.Mode != "tool_requested" || len(packet.ContextPolicy.RequestTools) == 0 {
 		t.Fatalf("context policy = %#v", packet.ContextPolicy)
+	}
+	if len(packet.Skills) != 1 || packet.Skills[0].Name != "go-tests" {
+		t.Fatalf("skills = %#v", packet.Skills)
 	}
 }
 

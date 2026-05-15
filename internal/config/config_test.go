@@ -10,6 +10,9 @@ func TestDefaultModelRoles(t *testing.T) {
 	if got := cfg.ProviderForRole("worker"); got.Model != "llama3.1" {
 		t.Fatalf("worker model = %q, want llama3.1", got.Model)
 	}
+	if !cfg.Skills.SkillsEnabled() || len(cfg.Skills.Paths) == 0 {
+		t.Fatalf("Skills = %#v, want enabled defaults", cfg.Skills)
+	}
 }
 
 func TestModelRolesDefaultToActiveProvider(t *testing.T) {
@@ -22,5 +25,20 @@ func TestModelRolesDefaultToActiveProvider(t *testing.T) {
 	cfg.withDefaults()
 	if cfg.ModelRoles.Orchestrator != "primary" || cfg.ModelRoles.Worker != "primary" {
 		t.Fatalf("ModelRoles = %#v, want primary defaults", cfg.ModelRoles)
+	}
+	if !cfg.Skills.SkillsEnabled() || len(cfg.Skills.Paths) == 0 {
+		t.Fatalf("Skills = %#v, want default paths", cfg.Skills)
+	}
+}
+
+func TestSkillsEnabledCanBeDisabledWithoutCustomPaths(t *testing.T) {
+	disabled := false
+	cfg := Config{Skills: Skills{Enabled: &disabled}}
+	cfg.withDefaults()
+	if cfg.Skills.SkillsEnabled() {
+		t.Fatalf("SkillsEnabled = true, want false")
+	}
+	if len(cfg.Skills.Paths) == 0 {
+		t.Fatalf("Skills paths were not defaulted")
 	}
 }

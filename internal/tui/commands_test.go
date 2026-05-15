@@ -51,6 +51,12 @@ func TestSlashCommandsShowsPalette(t *testing.T) {
 			t.Fatalf("palette missing %q:\n%s", want, view)
 		}
 	}
+	raw := commandPaletteText()
+	for _, want := range []string{"Skills:", "/skills"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("raw palette missing %q:\n%s", want, raw)
+		}
+	}
 }
 
 func TestSlashProjectCommand(t *testing.T) {
@@ -82,7 +88,7 @@ func TestSlashModelsCommand(t *testing.T) {
 
 func TestSlashDurableIDEViews(t *testing.T) {
 	m := commandTestModel(t)
-	for _, command := range []string{"/tools", "/config", "/outputs", "/files"} {
+	for _, command := range []string{"/tools", "/skills", "/config", "/outputs", "/files"} {
 		updated, _, handled := m.handleSlashCommand(command)
 		if !handled {
 			t.Fatalf("%s handled = false, want true", command)
@@ -106,6 +112,31 @@ func TestSlashDurableIDEViews(t *testing.T) {
 	got := updated.(model)
 	if got.mode != modeChat || got.status != "chat" {
 		t.Fatalf("mode/status = %v/%q, want chat", got.mode, got.status)
+	}
+}
+
+func TestSlashSkillsCommandShowsDiscoveredSkills(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".weazlcode", "skills", "repo-style")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("name: repo-style\ndescription: Follow repo conventions.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.cfg.Skills.Paths = []string{".weazlcode/skills"}
+
+	updated, _, handled := m.handleSlashCommand("/skills")
+	if !handled {
+		t.Fatal("skills handled = false")
+	}
+	view := updated.(model).viewport.View()
+	for _, want := range []string{"repo-style", "Follow repo conventions.", ".weazlcode/skills"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("skills view missing %q:\n%s", want, view)
+		}
 	}
 }
 
@@ -263,8 +294,16 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	skillDir := filepath.Join(root, ".weazlcode", "skills", "go-tests")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("name: go-tests\ndescription: Write focused Go tests.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	m.project.Root = root
 	m.project.Languages = []string{"go"}
+	m.cfg.Skills.Paths = []string{".weazlcode/skills"}
 	if err := m.store.RememberProject(root, "style", "small patches", "project"); err != nil {
 		t.Fatalf("RememberProject: %v", err)
 	}
@@ -273,7 +312,7 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", "Use small tasks", "go test ./...", "style: small patches", "change README"} {
+	for _, want := range []string{"Return only valid JSON", `"skills"`, "Use small tasks", "go test ./...", "style: small patches", "go-tests", "Write focused Go tests.", "change README"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("messages missing %q:\n%s", want, combined)
 		}
@@ -395,6 +434,7 @@ func TestSlashPlanEditCommandUpdatesDraftTask(t *testing.T) {
 		"/plan edit 1 goal Replace old wording with Phase 2 wording",
 		"/plan edit 1 allowed_paths README.md, docs/README.md",
 		"/plan edit 1 context_files README.md",
+		"/plan edit 1 skills go-tests,repo-style",
 		"/plan edit 1 verification go test ./...",
 		"/plan edit 1 checks README updated;;tests pass",
 	}
@@ -424,6 +464,9 @@ func TestSlashPlanEditCommandUpdatesDraftTask(t *testing.T) {
 	}
 	if !reflect.DeepEqual(task.ContextFiles, []string{"README.md"}) {
 		t.Fatalf("context = %#v", task.ContextFiles)
+	}
+	if !reflect.DeepEqual(task.Skills, []string{"go-tests", "repo-style"}) {
+		t.Fatalf("skills = %#v", task.Skills)
 	}
 	if !reflect.DeepEqual(task.Verification, []string{"go test ./..."}) {
 		t.Fatalf("verification = %#v", task.Verification)
@@ -610,6 +653,35 @@ func TestSlashRunTaskMarksTaskRunning(t *testing.T) {
 	}
 	if !strings.Contains(got.viewport.View(), `"tools_allowed"`) {
 		t.Fatalf("viewport missing worker packet: %q", got.viewport.View())
+	}
+}
+
+func TestBuildWorkerPacketIncludesAttachedSkills(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".weazlcode", "skills", "repo-style")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("name: repo-style\ndescription: Follow repo conventions.\n\nPrefer local helpers."), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.cfg.Skills.Paths = []string{".weazlcode/skills"}
+	packet, err := m.buildWorkerPacket(coding.Task{
+		ID:           "task-1",
+		PlanID:       "plan-1",
+		Title:        "Task",
+		Goal:         "Update README.md to mention skills.",
+		Status:       coding.TaskStatusPending,
+		AllowedPaths: []string{"README.md"},
+		Skills:       []string{"repo-style"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	if len(packet.Skills) != 1 || packet.Skills[0].Name != "repo-style" || !strings.Contains(packet.Skills[0].Content, "Prefer local helpers.") {
+		t.Fatalf("skills = %#v", packet.Skills)
 	}
 }
 

@@ -15,6 +15,7 @@ type TaskPacket struct {
 	AllowedPaths     []string          `json:"allowed_paths"`
 	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
 	ContextFiles     []ContextFile     `json:"context_files,omitempty"`
+	Skills           []SkillContext    `json:"skills,omitempty"`
 	ContextPolicy    ContextPolicy     `json:"context_policy"`
 	Diagnostics      []Diagnostic      `json:"diagnostics,omitempty"`
 	ToolsAllowed     []string          `json:"tools_allowed"`
@@ -28,6 +29,14 @@ type ContextFile struct {
 	EndLine   int    `json:"end_line,omitempty"`
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type SkillContext struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+	Truncated   bool   `json:"truncated,omitempty"`
 }
 
 type ContextPolicy struct {
@@ -75,6 +84,7 @@ type ContextPackOptions struct {
 	DefaultVerify   []string
 	DefaultAllowed  []string
 	Diagnostics     []Diagnostic
+	Skills          []SkillContext
 	LineRangeByFile map[string]LineRange
 }
 
@@ -114,6 +124,7 @@ func BuildTaskPacket(task Task, opts ContextPackOptions) (TaskPacket, error) {
 		AllowedPaths:   allowed,
 		ForbiddenPaths: task.ForbiddenPaths,
 		ContextFiles:   contextFiles,
+		Skills:         opts.Skills,
 		ContextPolicy: ContextPolicy{
 			Mode:         "tool_requested",
 			RequestTools: []string{"read_file", "read_file_range", "search_files"},

@@ -91,7 +91,7 @@ func (s *Store) Plans(sessionID string, limit int) ([]coding.Plan, error) {
 
 func (s *Store) Tasks(planID string) ([]coding.Task, error) {
 	rows, err := s.db.Query(
-		`select id, plan_id, title, goal, status, allowed_paths, forbidden_paths, context_files, verification, acceptance_checks, created_at, updated_at
+		`select id, plan_id, title, goal, status, allowed_paths, forbidden_paths, context_files, skills, verification, acceptance_checks, created_at, updated_at
 		 from tasks where plan_id = ? order by created_at, id`,
 		planID,
 	)
@@ -188,6 +188,10 @@ func insertTask(tx *sql.Tx, task coding.Task) error {
 	if err != nil {
 		return err
 	}
+	skills, err := marshalJSON(task.Skills)
+	if err != nil {
+		return err
+	}
 	verification, err := marshalJSON(task.Verification)
 	if err != nil {
 		return err
@@ -197,9 +201,9 @@ func insertTask(tx *sql.Tx, task coding.Task) error {
 		return err
 	}
 	_, err = tx.Exec(
-		`insert into tasks (id, plan_id, title, goal, status, allowed_paths, forbidden_paths, context_files, verification, acceptance_checks, updated_at)
-		 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)`,
-		task.ID, task.PlanID, task.Title, task.Goal, task.Status, allowed, forbidden, contextFiles, verification, checks,
+		`insert into tasks (id, plan_id, title, goal, status, allowed_paths, forbidden_paths, context_files, skills, verification, acceptance_checks, updated_at)
+		 values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)`,
+		task.ID, task.PlanID, task.Title, task.Goal, task.Status, allowed, forbidden, contextFiles, skills, verification, checks,
 	)
 	return err
 }
@@ -216,8 +220,8 @@ func scanTask(row interface {
 	Scan(dest ...any) error
 }) (coding.Task, error) {
 	var task coding.Task
-	var allowed, forbidden, contextFiles, verification, checks string
-	err := row.Scan(&task.ID, &task.PlanID, &task.Title, &task.Goal, &task.Status, &allowed, &forbidden, &contextFiles, &verification, &checks, &task.CreatedAt, &task.UpdatedAt)
+	var allowed, forbidden, contextFiles, skills, verification, checks string
+	err := row.Scan(&task.ID, &task.PlanID, &task.Title, &task.Goal, &task.Status, &allowed, &forbidden, &contextFiles, &skills, &verification, &checks, &task.CreatedAt, &task.UpdatedAt)
 	if err != nil {
 		return task, err
 	}
@@ -228,6 +232,9 @@ func scanTask(row interface {
 		return task, err
 	}
 	if err := unmarshalJSON(contextFiles, &task.ContextFiles); err != nil {
+		return task, err
+	}
+	if err := unmarshalJSON(skills, &task.Skills); err != nil {
 		return task, err
 	}
 	if err := unmarshalJSON(verification, &task.Verification); err != nil {

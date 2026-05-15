@@ -47,6 +47,7 @@ func TestPrepareImportedPlanNormalizesProjectPaths(t *testing.T) {
 			AllowedPaths:     []string{"/tmp/project/README.md"},
 			ForbiddenPaths:   []string{"/tmp/project/secrets"},
 			ContextFiles:     []string{"/tmp/project/internal/app.go"},
+			Skills:           []string{"go-tests", "go-tests", ""},
 			Verification:     []string{"go test ./..."},
 			AcceptanceChecks: []AcceptanceCheck{{Description: "done"}},
 		}},
@@ -55,6 +56,9 @@ func TestPrepareImportedPlanNormalizesProjectPaths(t *testing.T) {
 	task := got.Tasks[0]
 	if task.AllowedPaths[0] != "README.md" || task.ForbiddenPaths[0] != "secrets" || task.ContextFiles[0] != "internal/app.go" {
 		t.Fatalf("task paths = %#v", task)
+	}
+	if len(task.Skills) != 1 || task.Skills[0] != "go-tests" {
+		t.Fatalf("skills = %#v", task.Skills)
 	}
 }
 

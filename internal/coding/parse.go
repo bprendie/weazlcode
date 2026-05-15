@@ -99,11 +99,26 @@ func PrepareImportedPlan(plan Plan, sessionID, projectRoot string, idFunc func()
 		plan.Tasks[i].AllowedPaths = normalizePlanPaths(plan.Tasks[i].AllowedPaths, projectRoot)
 		plan.Tasks[i].ForbiddenPaths = normalizePlanPaths(plan.Tasks[i].ForbiddenPaths, projectRoot)
 		plan.Tasks[i].ContextFiles = normalizePlanPaths(plan.Tasks[i].ContextFiles, projectRoot)
+		plan.Tasks[i].Skills = normalizePlanSkills(plan.Tasks[i].Skills)
 		if strings.TrimSpace(plan.Tasks[i].Status) == "" {
 			plan.Tasks[i].Status = TaskStatusPending
 		}
 	}
 	return plan
+}
+
+func normalizePlanSkills(skills []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(skills))
+	for _, skill := range skills {
+		skill = strings.TrimSpace(skill)
+		if skill == "" || seen[skill] {
+			continue
+		}
+		seen[skill] = true
+		out = append(out, skill)
+	}
+	return out
 }
 
 func normalizePlanPaths(paths []string, projectRoot string) []string {
