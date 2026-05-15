@@ -1168,6 +1168,9 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	}
 	packet, err := coding.BuildTaskPacket(task, coding.ContextPackOptions{
 		ProjectRoot: m.project.Root,
+		MaxFileChars: workerContextFileCharBudget(
+			m.cfg.ProviderForRole("worker").ContextWindow,
+		),
 		DefaultAllowed: []string{
 			".",
 		},
@@ -1182,6 +1185,17 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	profile := m.workerCapacityProfile()
 	packet.WorkerProfile = profile.Label + ": " + profile.Instruction
 	return packet, nil
+}
+
+func workerContextFileCharBudget(contextWindow int) int {
+	switch {
+	case contextWindow >= 32768:
+		return 48000
+	case contextWindow >= 16384:
+		return 24000
+	default:
+		return 12000
+	}
 }
 
 func (m model) skillContexts(names []string) ([]coding.SkillContext, error) {

@@ -422,6 +422,22 @@ func TestPlanGenerateMessagesIncludeReferencedFilePreview(t *testing.T) {
 	}
 }
 
+func TestWorkerContextFileCharBudgetScalesWithContextWindow(t *testing.T) {
+	tests := []struct {
+		contextWindow int
+		want          int
+	}{
+		{8192, 12000},
+		{16384, 24000},
+		{32768, 48000},
+	}
+	for _, tt := range tests {
+		if got := workerContextFileCharBudget(tt.contextWindow); got != tt.want {
+			t.Fatalf("workerContextFileCharBudget(%d) = %d, want %d", tt.contextWindow, got, tt.want)
+		}
+	}
+}
+
 func TestSlashPacketCommand(t *testing.T) {
 	m := commandTestModel(t)
 	updated, _, handled := m.handleSlashCommand("/plan draft Add packet")
