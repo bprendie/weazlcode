@@ -373,6 +373,22 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 	}
 }
 
+func TestPlanGenerateMessagesIncludeReferencedFilePreview(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<!doctype html>\n<title>Weazl</title>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.project.Root = root
+	messages := m.planGenerateMessages("modularize index.html")
+	combined := messages[0].Content + "\n" + messages[1].Content
+	for _, want := range []string{"Project files:", "index.html", "Referenced file previews:", "<title>Weazl</title>"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("messages missing %q:\n%s", want, combined)
+		}
+	}
+}
+
 func TestSlashPacketCommand(t *testing.T) {
 	m := commandTestModel(t)
 	updated, _, handled := m.handleSlashCommand("/plan draft Add packet")
@@ -741,7 +757,7 @@ func TestBuildWorkerPacketIncludesAttachedSkills(t *testing.T) {
 
 func TestRunParallelWorkersStartsIndependentTasks(t *testing.T) {
 	m := commandTestModel(t)
-	raw := `{"title":"Parallel","summary":"Run independent tasks","tasks":[{"title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]},{"title":"B","goal":"Update docs/guide.md to mention B.","allowed_paths":["docs/guide.md"],"acceptance_checks":[{"description":"guide mentions B"}]},{"title":"C","goal":"Update internal/app.go to mention C.","allowed_paths":["internal/app.go"],"depends_on":["missing-task"],"acceptance_checks":[{"description":"app mentions C"}]}]}`
+	raw := `{"title":"Parallel","summary":"Run independent tasks","tasks":[{"id":"task-a","title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]},{"id":"task-b","title":"B","goal":"Update docs/guide.md to mention B.","allowed_paths":["docs/guide.md"],"acceptance_checks":[{"description":"guide mentions B"}]},{"id":"task-c","title":"C","goal":"Update internal/app.go to mention C.","allowed_paths":["internal/app.go"],"depends_on":["task-a"],"acceptance_checks":[{"description":"app mentions C"}]}]}`
 	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
 	if !handled {
 		t.Fatal("plan import handled = false")
@@ -981,6 +997,41 @@ func TestWorkerRunErrorBlocksTask(t *testing.T) {
 	}
 	if events[len(events)-1].Type != "worker_error" {
 		t.Fatalf("events = %#v", events)
+	}
+	packet := got.packetCommandText()
+	if !strings.Contains(packet, "Previous worker attempt failed before producing a patch") {
+		t.Fatalf("retry packet missing worker error context:\n%s", packet)
+	}
+	updated, _, _ = got.handleSlashCommand("/run-task")
+	got = updated.(model)
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan after retry: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusRunning {
+		t.Fatalf("task status after retry = %q, want running", plan.Tasks[0].Status)
+	}
+}
+
+func TestTaskGitDiffIncludesUntrackedAllowedFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := exec.Command("git", "init", root).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles.css"), []byte("body { color: black; }\n"), 0o644); err != nil {
+		t.Fatalf("write untracked file: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.session.ProjectRoot = root
+	diff, err := m.taskGitDiff(coding.Task{AllowedPaths: []string{"styles.css"}})
+	if err != nil {
+		t.Fatalf("taskGitDiff: %v", err)
+	}
+	for _, want := range []string{"diff --git a/styles.css b/styles.css", "new file mode", "+body { color: black; }"} {
+		if !strings.Contains(diff, want) {
+			t.Fatalf("diff missing %q:\n%s", want, diff)
+		}
 	}
 }
 

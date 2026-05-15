@@ -54,6 +54,24 @@ func TestValidatePlanQualityFlagsBroadPathScope(t *testing.T) {
 	}
 }
 
+func TestValidatePlanQualityFlagsUnknownDependencies(t *testing.T) {
+	plan := Plan{Tasks: []Task{{
+		ID:           "task-1",
+		Title:        "Dependent task",
+		Goal:         "Update README.md to document the setup flow.",
+		AllowedPaths: []string{"README.md"},
+		DependsOn:    []string{"missing-task"},
+		AcceptanceChecks: []AcceptanceCheck{
+			{Description: "README documents the setup flow"},
+		},
+	}}}
+
+	issues := ValidatePlanQuality(plan)
+	if !qualityIssuesContain(issues, `depends_on references unknown task id "missing-task"`) {
+		t.Fatalf("issues = %#v, want unknown dependency issue", issues)
+	}
+}
+
 func qualityIssuesContain(issues []PlanQualityIssue, want string) bool {
 	for _, issue := range issues {
 		if strings.Contains(issue.Message, want) {

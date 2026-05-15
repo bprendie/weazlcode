@@ -18,6 +18,13 @@ func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 	if len(plan.Tasks) == 0 {
 		return []PlanQualityIssue{{Severity: "error", Message: "plan has no tasks"}}
 	}
+	taskIDs := map[string]bool{}
+	for _, task := range plan.Tasks {
+		id := strings.TrimSpace(task.ID)
+		if id != "" {
+			taskIDs[id] = true
+		}
+	}
 	for i, task := range plan.Tasks {
 		label := strings.TrimSpace(task.Title)
 		if label == "" {
@@ -44,6 +51,12 @@ func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 		}
 		if len(task.AcceptanceChecks) == 0 {
 			add("acceptance_checks is empty; add concrete review criteria")
+		}
+		for _, dep := range task.DependsOn {
+			dep = strings.TrimSpace(dep)
+			if dep != "" && !taskIDs[dep] {
+				add(fmt.Sprintf("depends_on references unknown task id %q", dep))
+			}
 		}
 	}
 	return issues

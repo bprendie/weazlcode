@@ -23,6 +23,7 @@ import (
 
 const maxRepairAttempts = 2
 const maxWorkerPatchDiffRepairAttempts = 2
+const maxPlanGenerateTokens = 8192
 
 func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	if !strings.HasPrefix(strings.TrimSpace(input), "/") {
@@ -507,7 +508,12 @@ func (m model) runParallelWorkers() (tea.Model, tea.Cmd, bool) {
 		m.status = "plan not approved"
 		return m, nil, true
 	}
-	candidates := parallelRunnableTasks(plan.Tasks, m.workerConcurrency()-len(m.workerRuns))
+	candidates, err := m.parallelRunnableTasks(plan.Tasks, m.workerConcurrency()-len(m.workerRuns))
+	if err != nil {
+		m.addSystemNote("Parallel worker error: " + err.Error())
+		m.status = "parallel workers failed"
+		return m, nil, true
+	}
 	if len(candidates) == 0 {
 		m.addSystemNote("No independent pending tasks are available for parallel dispatch.")
 		m.status = "no parallel tasks"
@@ -1135,6 +1141,10 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 	}
 	repair, ok := latestRepairRequest(events)
 	if !ok {
+		if workerErr, retry := latestWorkerError(events); retry {
+			packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRetry note:\nPrevious worker attempt failed before producing a patch: " + workerErr)
+			return packet, nil
+		}
 		return packet, nil
 	}
 	packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\n" + repair)
@@ -1163,6 +1173,9 @@ func (m model) firstRunnableTask(tasks []coding.Task) (coding.Task, bool, error)
 			return coding.Task{}, false, err
 		}
 		if repairableTask(events) {
+			return task, true, nil
+		}
+		if retryableWorkerErrorTask(events) {
 			return task, true, nil
 		}
 	}
@@ -1691,11 +1704,65 @@ func (m model) taskGitDiff(task coding.Task) (string, error) {
 			return "", err
 		}
 		diff = strings.TrimSpace(diff)
-		if diff != "" {
+		if diff != "" && !gitDiffOutputEmpty(diff) {
 			parts = append(parts, diff)
+			continue
+		}
+		untracked, err := m.untrackedFileDiff(path)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(untracked) != "" {
+			parts = append(parts, untracked)
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+func gitDiffOutputEmpty(diff string) bool {
+	diff = strings.TrimSpace(diff)
+	return strings.HasPrefix(diff, "$ git diff") && !strings.Contains(diff, "\ndiff --git ")
+}
+
+func (m model) untrackedFileDiff(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" || strings.Contains(path, "\x00") || filepath.IsAbs(path) || strings.HasPrefix(filepath.Clean(path), "..") {
+		return "", nil
+	}
+	tracked := exec.Command("git", "ls-files", "--error-unmatch", "--", path)
+	tracked.Dir = m.project.Root
+	if err := tracked.Run(); err == nil {
+		return "", nil
+	}
+	fullPath := filepath.Join(m.project.Root, filepath.FromSlash(path))
+	info, err := os.Stat(fullPath)
+	if err != nil || info.IsDir() {
+		return "", nil
+	}
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return "", err
+	}
+	if strings.Contains(string(content), "\x00") {
+		return fmt.Sprintf("diff --git a/%s b/%s\nnew file mode 100644\nBinary files /dev/null and b/%s differ", path, path, path), nil
+	}
+	lines := strings.Split(string(content), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "diff --git a/%s b/%s\n", path, path)
+	b.WriteString("new file mode 100644\n")
+	b.WriteString("index 0000000..0000000\n")
+	b.WriteString("--- /dev/null\n")
+	fmt.Fprintf(&b, "+++ b/%s\n", path)
+	fmt.Fprintf(&b, "@@ -0,0 +1,%d @@\n", len(lines))
+	for _, line := range lines {
+		b.WriteString("+")
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
 
 func (m model) changedFiles() (string, error) {
@@ -1725,8 +1792,26 @@ func firstRunningTask(tasks []coding.Task) (coding.Task, bool) {
 }
 
 func parallelRunnableTasks(tasks []coding.Task, limit int) []coding.Task {
+	tasks, _ = parallelRunnableTasksWithRetry(tasks, limit, nil)
+	return tasks
+}
+
+func (m model) parallelRunnableTasks(tasks []coding.Task, limit int) ([]coding.Task, error) {
+	return parallelRunnableTasksWithRetry(tasks, limit, func(task coding.Task) (bool, error) {
+		if task.Status != coding.TaskStatusBlocked {
+			return false, nil
+		}
+		events, err := m.store.TaskEvents(task.ID)
+		if err != nil {
+			return false, err
+		}
+		return retryableWorkerErrorTask(events) || repairableTask(events), nil
+	})
+}
+
+func parallelRunnableTasksWithRetry(tasks []coding.Task, limit int, retryable func(coding.Task) (bool, error)) ([]coding.Task, error) {
 	if limit <= 0 {
-		return nil
+		return nil, nil
 	}
 	done := map[string]bool{}
 	activeOrSelected := map[string]bool{}
@@ -1743,7 +1828,16 @@ func parallelRunnableTasks(tasks []coding.Task, limit int) []coding.Task {
 	selected := make([]coding.Task, 0, limit)
 	for _, task := range tasks {
 		if task.Status != coding.TaskStatusPending {
-			continue
+			if retryable == nil {
+				continue
+			}
+			ok, err := retryable(task)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
 		}
 		if len(task.AllowedPaths) == 0 {
 			continue
@@ -1762,7 +1856,7 @@ func parallelRunnableTasks(tasks []coding.Task, limit int) []coding.Task {
 			break
 		}
 	}
-	return selected
+	return selected, nil
 }
 
 func dependenciesDone(task coding.Task, done map[string]bool) bool {
@@ -1868,6 +1962,23 @@ func repairableTask(events []coding.TaskEvent) bool {
 		}
 	}
 	return false
+}
+
+func retryableWorkerErrorTask(events []coding.TaskEvent) bool {
+	_, ok := latestWorkerError(events)
+	return ok
+}
+
+func latestWorkerError(events []coding.TaskEvent) (string, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "worker_error":
+			return strings.TrimSpace(events[i].Message), true
+		case "worker_model", "worker_patch", "worker_blocker", "repair_start", "repair_limit", "reviewer_verdict":
+			return "", false
+		}
+	}
+	return "", false
 }
 
 func repairAttemptCount(events []coding.TaskEvent) int {
@@ -2514,12 +2625,12 @@ func (m model) generatePlanCmd(ctx context.Context, runID int, request string) t
 
 func (m model) generatePlanJSON(ctx context.Context, request string) (string, error) {
 	client := llm.New(m.cfg.ProviderForRole("orchestrator"))
-	return client.Complete(ctx, m.planGenerateMessages(request), 2048)
+	return client.Complete(ctx, m.planGenerateMessages(request), maxPlanGenerateTokens)
 }
 
 func (m model) repairPlanJSON(ctx context.Context, request, raw string, parseErr error) (string, error) {
 	client := llm.New(m.cfg.ProviderForRole("orchestrator"))
-	return client.Complete(ctx, m.planRepairMessages(request, raw, parseErr), 2048)
+	return client.Complete(ctx, m.planRepairMessages(request, raw, parseErr), maxPlanGenerateTokens)
 }
 
 func (m model) planGenerateMessages(request string) []llm.ChatMessage {
@@ -2540,6 +2651,15 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 		for _, command := range commands {
 			fmt.Fprintf(&contextText, "- %s\n", command)
 		}
+	}
+	if files, err := projectFiles(m.project.Root, 80); err == nil && len(files) > 0 {
+		contextText.WriteString("\nProject files:\n")
+		for _, file := range files {
+			fmt.Fprintf(&contextText, "- %s (%d bytes)\n", file.Path, file.Size)
+		}
+	}
+	if previews := m.planReferencedFilePreviews(request); strings.TrimSpace(previews) != "" {
+		fmt.Fprintf(&contextText, "\nReferenced file previews:\n%s\n", previews)
 	}
 	if len(memories) > 0 {
 		contextText.WriteString("\nProject memory:\n")
@@ -2563,7 +2683,8 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 			Content: strings.Join([]string{
 				"You are the WeazlCode orchestrator.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Every task must include a stable unique id such as task-1, task-2, task-3. depends_on must reference those exact ids only.",
 				"Every task must be small enough for one local worker and must include explicit allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
 				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
@@ -2581,6 +2702,36 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 	}
 }
 
+func (m model) planReferencedFilePreviews(request string) string {
+	files, err := projectFiles(m.project.Root, 120)
+	if err != nil {
+		return ""
+	}
+	requestText := strings.ToLower(request)
+	var matches []filePick
+	for _, file := range files {
+		path := strings.ToLower(file.Path)
+		base := strings.ToLower(filepath.Base(file.Path))
+		if strings.Contains(requestText, path) || (base != "" && strings.Contains(requestText, base)) {
+			matches = append(matches, file)
+		}
+		if len(matches) >= 4 {
+			break
+		}
+	}
+	if len(matches) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, file := range matches {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(m.previewFileText(file.Path, 140))
+	}
+	return b.String()
+}
+
 func (m model) planRepairMessages(request, raw string, parseErr error) []llm.ChatMessage {
 	return []llm.ChatMessage{
 		{
@@ -2588,8 +2739,8 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 			Content: strings.Join([]string{
 				"You repair WeazlCode plan JSON.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
-				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[\"...\"],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
-				"Do not add unknown fields. Every task must include title, goal, and allowed_paths.",
+				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Do not add unknown fields. Every task must include id, title, goal, and allowed_paths. depends_on must reference exact task ids in the same plan.",
 				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for one bounded worker task.",
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
 			}, "\n"),
