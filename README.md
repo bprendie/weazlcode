@@ -23,6 +23,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Review Loops: Claude/OpenAI-class reviewers can inspect task-scoped evidence, request focused repairs, and send only bounded repair packets back to the local worker.
 - Replan And Cleanup: Rejected or blocked worker outputs are restored to their task baselines, and `/plan replan` can turn completed work, blocked evidence, and remaining tasks into a fresh draft plan.
 - Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under `.weazlcode/logs/hooks.jsonl`.
+- Notifications: Optional terminal-bell notifications for task completion, blocked tasks, worker blockers, and repair requests.
 
 ## Defaults
 
@@ -161,6 +162,20 @@ Hooks are disabled by default. When enabled, each configured command receives a 
 ```
 
 Supported events: `before_tool`, `after_tool`, and `task_done`. Hook results are visible in `/outputs`.
+
+## Notifications
+
+Native notifications are intentionally boring and local: disabled by default, terminal bell when enabled. For desktop notifications, use hooks with a command like `notify-send`.
+
+```json
+{
+  "notifications": {
+    "enabled": true,
+    "bell": true,
+    "events": ["task_done", "task_blocked", "repair_requested", "worker_blocker"]
+  }
+}
+```
 
 ## Security
 

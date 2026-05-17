@@ -670,7 +670,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		})
 		m.addSystemNote(fmt.Sprintf("Worker reported blocker for %s:\n%s", task.Title, patch.Blocker))
 		m.status = "worker reported blocker"
-		return m, nil, true
+		return m, m.notificationCmd("worker_blocker", task.Title, patch.Blocker), true
 	}
 	paths := coding.PatchPaths(patch.Patch)
 	if len(patch.Files) > 0 {
@@ -843,7 +843,7 @@ func (m model) blockTaskAfterWorkerApplyFailure(task coding.Task, message string
 	})
 	m.addSystemNote(message)
 	m.status = "worker patch apply failed"
-	return m, nil, true
+	return m, m.notificationCmd("task_blocked", task.Title, message), true
 }
 
 func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {
@@ -1703,6 +1703,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		TaskID  string               `json:"task_id"`
 		Verdict coding.ReviewVerdict `json:"verdict"`
 	}{TaskID: task.ID, Verdict: verdict})
+	var notify tea.Cmd
 	switch verdict.Verdict {
 	case coding.ReviewApprove:
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusDone); err != nil {
@@ -1720,6 +1721,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			"plan_id": plan.ID,
 			"summary": verdict.Summary,
 		})
+		notify = m.notificationCmd("task_done", task.Title, verdict.Summary)
 		m.addSystemNote("Reviewer approved task:\n" + renderJSON(verdict))
 		m.status = "task done"
 	case coding.ReviewNeedsFix:
@@ -1748,7 +1750,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			})
 			m.addSystemNote("Reviewer requested fixes, but the repair limit has been reached:\n" + renderJSON(verdict))
 			m.status = "repair limit reached"
-			return m, nil, true
+			return m, m.notificationCmd("task_blocked", task.Title, verdict.Summary), true
 		}
 		repairPayload, _ := json.Marshal(struct {
 			Attempt int      `json:"attempt"`
@@ -1770,6 +1772,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			Attempt int                  `json:"attempt"`
 			Verdict coding.ReviewVerdict `json:"verdict"`
 		}{TaskID: task.ID, Attempt: attempt, Verdict: verdict})
+		notify = m.notificationCmd("repair_requested", task.Title, verdict.Summary)
 		m.addSystemNote("Reviewer requested focused repair:\n" + renderJSON(verdict))
 		m.status = "repair requested"
 	case coding.ReviewBlocked:
@@ -1784,10 +1787,11 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			m.status = "review failed"
 			return m, nil, true
 		}
+		notify = m.notificationCmd("task_blocked", task.Title, verdict.Summary)
 		m.addSystemNote("Reviewer blocked task:\n" + renderJSON(verdict))
 		m.status = "review blocked"
 	}
-	return m, nil, true
+	return m, notify, true
 }
 
 func (m model) reviewApprovalIssues(task coding.Task) []string {
@@ -3658,6 +3662,8 @@ func (m model) configViewText() string {
 	workerProfile := m.workerCapacityProfile()
 	fmt.Fprintf(&b, "\nWorkers:\nconcurrency: %d\nrequest_timeout_seconds: %d\ncapacity: %s\n", m.workerConcurrency(), int(m.workerRequestTimeout().Seconds()), workerProfile.Label)
 	fmt.Fprintf(&b, "\nHooks:\nenabled: %t\ntimeout_seconds: %d\nevents: %d\n", m.cfg.Hooks.Enabled, m.cfg.Hooks.TimeoutSeconds, len(m.cfg.Hooks.Events))
+	bell := m.cfg.Notifications.Bell != nil && *m.cfg.Notifications.Bell
+	fmt.Fprintf(&b, "\nNotifications:\nenabled: %t\nbell: %t\nevents: %s\n", m.cfg.Notifications.Enabled, bell, strings.Join(m.cfg.Notifications.Events, ", "))
 	return strings.TrimRight(b.String(), "\n")
 }
 

@@ -19,6 +19,7 @@ type Config struct {
 	Skills         Skills              `json:"skills"`
 	Workers        Workers             `json:"workers"`
 	Hooks          Hooks               `json:"hooks"`
+	Notifications  Notifications       `json:"notifications"`
 }
 
 type ModelRoles struct {
@@ -75,6 +76,12 @@ type Hooks struct {
 type HookCommand struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
+}
+
+type Notifications struct {
+	Enabled bool     `json:"enabled"`
+	Bell    *bool    `json:"bell,omitempty"`
+	Events  []string `json:"events,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -167,6 +174,11 @@ func Default() Config {
 			TimeoutSeconds: 10,
 			Events:         map[string][]HookCommand{},
 		},
+		Notifications: Notifications{
+			Enabled: false,
+			Bell:    boolPtr(true),
+			Events:  defaultNotificationEvents(),
+		},
 	}
 }
 
@@ -240,6 +252,12 @@ func (c *Config) withDefaults() {
 	if c.Hooks.Events == nil {
 		c.Hooks.Events = map[string][]HookCommand{}
 	}
+	if c.Notifications.Bell == nil {
+		c.Notifications.Bell = def.Notifications.Bell
+	}
+	if len(c.Notifications.Events) == 0 {
+		c.Notifications.Events = def.Notifications.Events
+	}
 }
 
 func (c *Config) ProviderForRole(role string) Provider {
@@ -270,6 +288,10 @@ func (s Skills) SkillsEnabled() bool {
 
 func boolPtr(v bool) *bool {
 	return &v
+}
+
+func defaultNotificationEvents() []string {
+	return []string{"task_done", "task_blocked", "repair_requested", "worker_blocker"}
 }
 
 func defaultSkillPaths() []string {
