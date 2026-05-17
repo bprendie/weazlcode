@@ -20,6 +20,7 @@ type Config struct {
 	Workers        Workers             `json:"workers"`
 	Hooks          Hooks               `json:"hooks"`
 	Notifications  Notifications       `json:"notifications"`
+	Editor         Editor              `json:"editor"`
 }
 
 type ModelRoles struct {
@@ -82,6 +83,12 @@ type Notifications struct {
 	Enabled bool     `json:"enabled"`
 	Bell    *bool    `json:"bell,omitempty"`
 	Events  []string `json:"events,omitempty"`
+}
+
+type Editor struct {
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Wait    bool     `json:"wait,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -179,6 +186,7 @@ func Default() Config {
 			Bell:    boolPtr(true),
 			Events:  defaultNotificationEvents(),
 		},
+		Editor: Editor{},
 	}
 }
 

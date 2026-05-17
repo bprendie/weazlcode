@@ -228,7 +228,7 @@ Goal: use vLLM/Ollama server parallelism while preserving bounded tasks, auditab
 - [x] Hooks before/after tool calls and task completion.
 - [x] Notifications.
 - [ ] MCP client support if it becomes useful.
-- [ ] External editor integration.
+- [x] External editor integration.
 - [ ] Debug adapter protocol support.
 
 ## Immediate Next Build Order

@@ -50,6 +50,12 @@ func (m model) outputsCommandText() string {
 	} else {
 		entries = append(entries, hookEntries...)
 	}
+	editorEntries, err := m.editorLogOutputEntries(20)
+	if err != nil {
+		entries = append(entries, outputEntry{Source: "editor_log", Title: "Editor log read error", Summary: err.Error()})
+	} else {
+		entries = append(entries, editorEntries...)
+	}
 	sortOutputEntries(entries)
 	if len(entries) == 0 {
 		return "Outputs:\nNo task events or tool outputs yet."
@@ -198,6 +204,54 @@ func (m model) hookLogOutputEntries(limit int) ([]outputEntry, error) {
 			Source:  "hook",
 			Title:   fmt.Sprintf("%s: %s", log.Event, log.Command),
 			Summary: fmt.Sprintf("in %dms", log.DurationMS),
+			Detail:  detail,
+			Success: &success,
+		})
+	}
+	return entries, nil
+}
+
+func (m model) editorLogOutputEntries(limit int) ([]outputEntry, error) {
+	if strings.TrimSpace(m.project.LogDir) == "" {
+		return nil, nil
+	}
+	path := filepath.Join(m.project.LogDir, "editor.jsonl")
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var logs []editorLogEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	for scanner.Scan() {
+		var log editorLogEntry
+		if err := json.Unmarshal(scanner.Bytes(), &log); err == nil {
+			logs = append(logs, log)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(logs) > limit {
+		logs = logs[len(logs)-limit:]
+	}
+	entries := make([]outputEntry, 0, len(logs))
+	for _, log := range logs {
+		t, _ := time.Parse(time.RFC3339Nano, log.Time)
+		success := log.Success
+		detail := log.Output
+		if strings.TrimSpace(log.Error) != "" {
+			detail = strings.TrimSpace(detail + "\n" + log.Error)
+		}
+		entries = append(entries, outputEntry{
+			Time:    t,
+			Source:  "editor",
+			Title:   log.Path,
+			Summary: fmt.Sprintf("%s %s", log.Command, strings.Join(log.Args, " ")),
 			Detail:  detail,
 			Success: &success,
 		})

@@ -47,8 +47,16 @@ func TestOutputsCommandTextIncludesTaskEventsAndToolLogs(t *testing.T) {
 		DurationMS: 4,
 		Output:     "sent",
 	})
+	m.logEditor(editorLogEntry{
+		Time:    time.Now().Format(time.RFC3339Nano),
+		Session: m.session.ID,
+		Command: "code",
+		Args:    []string{"README.md"},
+		Path:    "README.md",
+		Success: true,
+	})
 	text := m.outputsCommandText()
-	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main", "task_done: notify-send", "sent"} {
+	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main", "task_done: notify-send", "sent", "code README.md"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("outputs missing %q:\n%s", want, text)
 		}

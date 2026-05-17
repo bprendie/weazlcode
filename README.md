@@ -24,6 +24,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Replan And Cleanup: Rejected or blocked worker outputs are restored to their task baselines, and `/plan replan` can turn completed work, blocked evidence, and remaining tasks into a fresh draft plan.
 - Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under `.weazlcode/logs/hooks.jsonl`.
 - Notifications: Optional terminal-bell notifications for task completion, blocked tasks, worker blockers, and repair requests.
+- External Editor: `/edit <path> [line]` opens project files through a configured editor command while keeping paths scoped to the project root.
 
 ## Defaults
 
@@ -101,7 +102,7 @@ weazlcode init
 Slash commands drive the IDE. Hit `/` to open the palette.
 
 - Workflow: `/plan draft`, `/plan generate`, `/plan replan`, `/run-task`, `/run-worker`, `/run-workers`, `/run-reviewer`, `/commit-message`, `/export-run`.
-- Views: `/diff`, `/outputs`, `/files`, `/preview`, `/skills`, `/diagnostics`, `/symbols`.
+- Views: `/diff`, `/outputs`, `/files`, `/preview`, `/edit`, `/skills`, `/diagnostics`, `/symbols`.
 - Control: `ctrl+t` trims context, `ctrl+u` nukes active session context, `ctrl+s` saves workspace, and `ctrl+r` / `ctrl+w` opens the workspace picker.
 - Mouse/Copy: `ctrl+m` toggles between terminal copy mode and TUI mouse-scroll mode.
 
@@ -176,6 +177,22 @@ Native notifications are intentionally boring and local: disabled by default, te
   }
 }
 ```
+
+## External Editor
+
+Configure an editor command if you want WeazlCode to hand off a file without leaving the TUI workflow:
+
+```json
+{
+  "editor": {
+    "command": "code",
+    "args": ["--goto", "{file}:{line}"],
+    "wait": false
+  }
+}
+```
+
+Use `/edit README.md 42` to open a file. `{file}` and `{line}` are replaced in configured args. If no args are configured, WeazlCode uses `+line file`, which works for many terminal editors. If no command is configured, it falls back to `VISUAL` and then `EDITOR`.
 
 ## Security
 

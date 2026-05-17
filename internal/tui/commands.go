@@ -81,6 +81,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("files", m.filesCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "preview":
 		m.setIDEView("preview", m.previewCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
+	case "edit", "editor":
+		return m.openExternalEditorCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "attach":
 		return m.attachFileCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "lsp":
@@ -263,6 +265,7 @@ func slashHelp() string {
 		"/outputs - show recent task events and tool outputs",
 		"/files [query] - fuzzy-find project files",
 		"/preview <path> - preview a project file",
+		"/edit <path> [line] - open a project file in the configured external editor",
 		"/attach [task] <path> [start-end] - attach a file or line range to a draft task",
 		"/lsp - show detected language servers",
 		"/diagnostics - show project diagnostics",
@@ -314,7 +317,7 @@ func commandPaletteText() string {
 		{"Plan", []string{"/plan", "/plan generate <request>", "/plan replan [guidance]", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/run-workers", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
-		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
+		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/edit <path> [line]", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
 		{"Skills", []string{"/skills"}},
 		{"Git", []string{"/diff", "/commit-message", "/commit yes"}},
 		{"Session", []string{"/chat", "/cancel", "/sessions", "/workspaces", "/new", "/clear", "/trim", "/copy"}},
@@ -3664,6 +3667,7 @@ func (m model) configViewText() string {
 	fmt.Fprintf(&b, "\nHooks:\nenabled: %t\ntimeout_seconds: %d\nevents: %d\n", m.cfg.Hooks.Enabled, m.cfg.Hooks.TimeoutSeconds, len(m.cfg.Hooks.Events))
 	bell := m.cfg.Notifications.Bell != nil && *m.cfg.Notifications.Bell
 	fmt.Fprintf(&b, "\nNotifications:\nenabled: %t\nbell: %t\nevents: %s\n", m.cfg.Notifications.Enabled, bell, strings.Join(m.cfg.Notifications.Events, ", "))
+	fmt.Fprintf(&b, "\nEditor:\ncommand: %s\nargs: %s\nwait: %t\n", emptyFallback(m.cfg.Editor.Command, "VISUAL/EDITOR"), strings.Join(m.cfg.Editor.Args, " "), m.cfg.Editor.Wait)
 	return strings.TrimRight(b.String(), "\n")
 }
 
