@@ -11,3 +11,4 @@
 *.exe
 *.test
 *.out
+/planning_docs/local_modularization_plan.md
