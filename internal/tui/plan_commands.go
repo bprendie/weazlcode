@@ -18,6 +18,8 @@ import (
 	"github.com/bprendie/weazlcode/internal/project"
 )
 
+const maxPlanGenerateTokens = 8192
+
 func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
 	plan, ok, err := m.store.LatestPlan(m.session.ID)
 	if err != nil {

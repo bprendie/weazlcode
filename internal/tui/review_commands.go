@@ -15,6 +15,8 @@ import (
 	"github.com/bprendie/weazlcode/internal/project"
 )
 
+const maxRepairAttempts = 2
+
 func (m model) reviewerInputCommandText() string {
 	input, err := m.buildReviewerInput()
 	if err != nil {
