@@ -19,6 +19,9 @@ func TestDefaultModelRoles(t *testing.T) {
 	if cfg.Workers.RequestTimeoutSeconds != 300 {
 		t.Fatalf("Workers.RequestTimeoutSeconds = %d, want 300", cfg.Workers.RequestTimeoutSeconds)
 	}
+	if cfg.Hooks.Enabled || cfg.Hooks.TimeoutSeconds != 10 || cfg.Hooks.Events == nil {
+		t.Fatalf("Hooks = %#v, want disabled with defaults", cfg.Hooks)
+	}
 }
 
 func TestModelRolesDefaultToActiveProvider(t *testing.T) {
@@ -40,6 +43,9 @@ func TestModelRolesDefaultToActiveProvider(t *testing.T) {
 	}
 	if cfg.Workers.RequestTimeoutSeconds != 300 {
 		t.Fatalf("Workers.RequestTimeoutSeconds = %d, want 300", cfg.Workers.RequestTimeoutSeconds)
+	}
+	if cfg.Hooks.TimeoutSeconds != 10 || cfg.Hooks.Events == nil {
+		t.Fatalf("Hooks = %#v, want defaults", cfg.Hooks)
 	}
 }
 

@@ -18,6 +18,7 @@ type Config struct {
 	Tools          Tools               `json:"tools"`
 	Skills         Skills              `json:"skills"`
 	Workers        Workers             `json:"workers"`
+	Hooks          Hooks               `json:"hooks"`
 }
 
 type ModelRoles struct {
@@ -63,6 +64,17 @@ type Skills struct {
 type Workers struct {
 	Concurrency           int `json:"concurrency"`
 	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
+}
+
+type Hooks struct {
+	Enabled        bool                     `json:"enabled"`
+	TimeoutSeconds int                      `json:"timeout_seconds,omitempty"`
+	Events         map[string][]HookCommand `json:"events,omitempty"`
+}
+
+type HookCommand struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -150,6 +162,11 @@ func Default() Config {
 			Concurrency:           2,
 			RequestTimeoutSeconds: 300,
 		},
+		Hooks: Hooks{
+			Enabled:        false,
+			TimeoutSeconds: 10,
+			Events:         map[string][]HookCommand{},
+		},
 	}
 }
 
@@ -216,6 +233,12 @@ func (c *Config) withDefaults() {
 	}
 	if c.Workers.RequestTimeoutSeconds <= 0 {
 		c.Workers.RequestTimeoutSeconds = def.Workers.RequestTimeoutSeconds
+	}
+	if c.Hooks.TimeoutSeconds <= 0 {
+		c.Hooks.TimeoutSeconds = def.Hooks.TimeoutSeconds
+	}
+	if c.Hooks.Events == nil {
+		c.Hooks.Events = map[string][]HookCommand{}
 	}
 }
 

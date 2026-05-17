@@ -70,6 +70,12 @@ func (m model) runPendingTools(inputTokens, outputTokens int, approved bool) (te
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		m.runHooks("before_tool", map[string]any{
+			"call_id": call.ID,
+			"tool":    call.Function.Name,
+			"safety":  safetyLabel(tool.SafetyLevel()),
+			"args":    args,
+		})
 		start := time.Now()
 		result, err := tool.Execute(ctx, args)
 		duration := time.Since(start)
@@ -80,6 +86,15 @@ func (m model) runPendingTools(inputTokens, outputTokens int, approved bool) (te
 		}
 		result = limitToolOutput(result, m.cfg.Tools.MaxOutputChars)
 		m.logToolCall(call.ID, call.Function.Name, tool.SafetyLevel(), call.Function.Arguments, args, result, duration, success)
+		m.runHooks("after_tool", map[string]any{
+			"call_id":     call.ID,
+			"tool":        call.Function.Name,
+			"safety":      safetyLabel(tool.SafetyLevel()),
+			"args":        args,
+			"success":     success,
+			"duration_ms": duration.Milliseconds(),
+			"result":      result,
+		})
 
 		m.toolResults = append(m.toolResults, result)
 		if err := m.store.AddMessageWithTools(m.session.ID, "tool", result, "", call.ID); err != nil {

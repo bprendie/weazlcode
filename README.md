@@ -22,6 +22,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, per-task worker cancellation, and configurable worker request timeouts.
 - Review Loops: Claude/OpenAI-class reviewers can inspect task-scoped evidence, request focused repairs, and send only bounded repair packets back to the local worker.
 - Replan And Cleanup: Rejected or blocked worker outputs are restored to their task baselines, and `/plan replan` can turn completed work, blocked evidence, and remaining tasks into a fresh draft plan.
+- Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under `.weazlcode/logs/hooks.jsonl`.
 
 ## Defaults
 
@@ -137,6 +138,29 @@ Configure tools in `~/.config/weazlcode/config.json`:
 - Workspace Tools: Operates strictly under configured `workspace_roots`. Includes `read_file`, `git_diff`, `apply_patch`, and local SQLite querying.
 - Execution Tools: `run_readonly_command` executes a tight allowlist of inspection commands like `rg`, `cat`, and `ls`. `run_verification_command` runs approved linters/tests and requires explicit prompt-level approval.
 - Memory: Encrypted local memory storage with remember/recall support.
+
+## Hooks
+
+Hooks are disabled by default. When enabled, each configured command receives a JSON event payload on stdin and runs from the project root with a short timeout. Configure them in `~/.config/weazlcode/config.json`:
+
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "timeout_seconds": 10,
+    "events": {
+      "task_done": [
+        {
+          "command": "notify-send",
+          "args": ["WeazlCode", "Task completed"]
+        }
+      ]
+    }
+  }
+}
+```
+
+Supported events: `before_tool`, `after_tool`, and `task_done`. Hook results are visible in `/outputs`.
 
 ## Security
 

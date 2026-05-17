@@ -38,8 +38,17 @@ func TestOutputsCommandTextIncludesTaskEventsAndToolLogs(t *testing.T) {
 		CreatedAt: time.Now(),
 	})
 	m.logToolCall("call-1", "git_status", tools.SafetyLevelSafe, `{"cwd":"."}`, map[string]any{"cwd": "."}, "## main", 12*time.Millisecond, true)
+	m.logHook(hookLogEntry{
+		Time:       time.Now().Format(time.RFC3339Nano),
+		SessionID:  m.session.ID,
+		Event:      "task_done",
+		Command:    "notify-send",
+		Success:    true,
+		DurationMS: 4,
+		Output:     "sent",
+	})
 	text := m.outputsCommandText()
-	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main"} {
+	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main", "task_done: notify-send", "sent"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("outputs missing %q:\n%s", want, text)
 		}

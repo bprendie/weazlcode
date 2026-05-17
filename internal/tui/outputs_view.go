@@ -44,6 +44,12 @@ func (m model) outputsCommandText() string {
 	} else {
 		entries = append(entries, toolEntries...)
 	}
+	hookEntries, err := m.hookLogOutputEntries(20)
+	if err != nil {
+		entries = append(entries, outputEntry{Source: "hook_log", Title: "Hook log read error", Summary: err.Error()})
+	} else {
+		entries = append(entries, hookEntries...)
+	}
 	sortOutputEntries(entries)
 	if len(entries) == 0 {
 		return "Outputs:\nNo task events or tool outputs yet."
@@ -100,7 +106,7 @@ func taskEventOutputEntries(task coding.Task, events []coding.TaskEvent) []outpu
 
 func visibleTaskEvent(eventType string) bool {
 	switch eventType {
-	case "task_baseline", "worker_patch", "worker_blocker", "worker_error", "worker_timeout", "worker_json_error", "worker_rejected", "verification", "verification_error", "reviewer_verdict", "review_guardrail", "repair_requested", "repair_start", "repair_limit":
+	case "task_baseline", "worker_patch", "worker_blocker", "worker_error", "worker_timeout", "worker_json_error", "worker_rejected", "verification", "verification_error", "reviewer_verdict", "review_guardrail", "repair_requested", "repair_start", "repair_limit", "output_cleanup":
 		return true
 	default:
 		return false
@@ -145,6 +151,54 @@ func (m model) toolLogOutputEntries(limit int) ([]outputEntry, error) {
 			Title:   log.Tool,
 			Summary: fmt.Sprintf("%s in %dms", log.Safety, log.DurationMS),
 			Detail:  log.Result,
+			Success: &success,
+		})
+	}
+	return entries, nil
+}
+
+func (m model) hookLogOutputEntries(limit int) ([]outputEntry, error) {
+	if strings.TrimSpace(m.project.LogDir) == "" {
+		return nil, nil
+	}
+	path := filepath.Join(m.project.LogDir, "hooks.jsonl")
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var logs []hookLogEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	for scanner.Scan() {
+		var log hookLogEntry
+		if err := json.Unmarshal(scanner.Bytes(), &log); err == nil {
+			logs = append(logs, log)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(logs) > limit {
+		logs = logs[len(logs)-limit:]
+	}
+	entries := make([]outputEntry, 0, len(logs))
+	for _, log := range logs {
+		t, _ := time.Parse(time.RFC3339Nano, log.Time)
+		success := log.Success
+		detail := log.Output
+		if strings.TrimSpace(log.Error) != "" {
+			detail = strings.TrimSpace(detail + "\n" + log.Error)
+		}
+		entries = append(entries, outputEntry{
+			Time:    t,
+			Source:  "hook",
+			Title:   fmt.Sprintf("%s: %s", log.Event, log.Command),
+			Summary: fmt.Sprintf("in %dms", log.DurationMS),
+			Detail:  detail,
 			Success: &success,
 		})
 	}

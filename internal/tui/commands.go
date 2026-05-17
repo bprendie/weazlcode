@@ -1713,6 +1713,13 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		if planDoneAfterTask(plan.Tasks, task.ID) {
 			_ = m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusDone)
 		}
+		m.runHooks("task_done", map[string]any{
+			"task_id": task.ID,
+			"title":   task.Title,
+			"goal":    task.Goal,
+			"plan_id": plan.ID,
+			"summary": verdict.Summary,
+		})
 		m.addSystemNote("Reviewer approved task:\n" + renderJSON(verdict))
 		m.status = "task done"
 	case coding.ReviewNeedsFix:
@@ -3650,6 +3657,7 @@ func (m model) configViewText() string {
 	fmt.Fprintf(&b, "\nSkills:\nenabled: %t\npaths: %s\n", m.cfg.Skills.SkillsEnabled(), strings.Join(m.cfg.Skills.Paths, ", "))
 	workerProfile := m.workerCapacityProfile()
 	fmt.Fprintf(&b, "\nWorkers:\nconcurrency: %d\nrequest_timeout_seconds: %d\ncapacity: %s\n", m.workerConcurrency(), int(m.workerRequestTimeout().Seconds()), workerProfile.Label)
+	fmt.Fprintf(&b, "\nHooks:\nenabled: %t\ntimeout_seconds: %d\nevents: %d\n", m.cfg.Hooks.Enabled, m.cfg.Hooks.TimeoutSeconds, len(m.cfg.Hooks.Events))
 	return strings.TrimRight(b.String(), "\n")
 }
 
