@@ -55,8 +55,19 @@ func TestOutputsCommandTextIncludesTaskEventsAndToolLogs(t *testing.T) {
 		Path:    "README.md",
 		Success: true,
 	})
+	m.logDebug(debugLogEntry{
+		Time:       time.Now().Format(time.RFC3339Nano),
+		SessionID:  m.session.ID,
+		Name:       "unit",
+		Adapter:    "go",
+		Command:    "dlv-dap",
+		Request:    "launch",
+		Success:    true,
+		DurationMS: 7,
+		Output:     "debug-ok",
+	})
 	text := m.outputsCommandText()
-	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main", "task_done: notify-send", "sent", "code README.md"} {
+	for _, want := range []string{"Outputs:", "Task: verification", "go test ./...", "git_status", "## main", "task_done: notify-send", "sent", "code README.md", "unit: launch", "debug-ok"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("outputs missing %q:\n%s", want, text)
 		}

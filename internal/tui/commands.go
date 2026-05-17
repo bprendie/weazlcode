@@ -83,6 +83,8 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 		m.setIDEView("preview", m.previewCommandText(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "edit", "editor":
 		return m.openExternalEditorCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
+	case "debug":
+		return m.handleDebugCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "attach":
 		return m.attachFileCommand(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "lsp":
@@ -266,6 +268,8 @@ func slashHelp() string {
 		"/files [query] - fuzzy-find project files",
 		"/preview <path> - preview a project file",
 		"/edit <path> [line] - open a project file in the configured external editor",
+		"/debug - show configured debug adapters and launch configurations",
+		"/debug launch <name> - run a debug-adapter launch handshake",
 		"/attach [task] <path> [start-end] - attach a file or line range to a draft task",
 		"/lsp - show detected language servers",
 		"/diagnostics - show project diagnostics",
@@ -317,7 +321,7 @@ func commandPaletteText() string {
 		{"Plan", []string{"/plan", "/plan generate <request>", "/plan replan [guidance]", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/run-workers", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
-		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/edit <path> [line]", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
+		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/edit <path> [line]", "/debug", "/debug launch <name>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},
 		{"Skills", []string{"/skills"}},
 		{"Git", []string{"/diff", "/commit-message", "/commit yes"}},
 		{"Session", []string{"/chat", "/cancel", "/sessions", "/workspaces", "/new", "/clear", "/trim", "/copy"}},
@@ -3668,6 +3672,7 @@ func (m model) configViewText() string {
 	bell := m.cfg.Notifications.Bell != nil && *m.cfg.Notifications.Bell
 	fmt.Fprintf(&b, "\nNotifications:\nenabled: %t\nbell: %t\nevents: %s\n", m.cfg.Notifications.Enabled, bell, strings.Join(m.cfg.Notifications.Events, ", "))
 	fmt.Fprintf(&b, "\nEditor:\ncommand: %s\nargs: %s\nwait: %t\n", emptyFallback(m.cfg.Editor.Command, "VISUAL/EDITOR"), strings.Join(m.cfg.Editor.Args, " "), m.cfg.Editor.Wait)
+	fmt.Fprintf(&b, "\nDebug:\nadapters: %d\nconfigurations: %d\ntimeout_seconds: %d\n", len(m.cfg.Debug.Adapters), len(m.cfg.Debug.Configurations), m.debugTimeoutSeconds())
 	return strings.TrimRight(b.String(), "\n")
 }
 

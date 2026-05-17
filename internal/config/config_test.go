@@ -25,6 +25,9 @@ func TestDefaultModelRoles(t *testing.T) {
 	if cfg.Notifications.Enabled || cfg.Notifications.Bell == nil || !*cfg.Notifications.Bell || len(cfg.Notifications.Events) == 0 {
 		t.Fatalf("Notifications = %#v, want disabled with defaults", cfg.Notifications)
 	}
+	if cfg.Debug.TimeoutSeconds != 30 || cfg.Debug.Adapters == nil || cfg.Debug.Configurations == nil {
+		t.Fatalf("Debug = %#v, want empty defaults with timeout", cfg.Debug)
+	}
 }
 
 func TestModelRolesDefaultToActiveProvider(t *testing.T) {
@@ -52,6 +55,9 @@ func TestModelRolesDefaultToActiveProvider(t *testing.T) {
 	}
 	if cfg.Notifications.Bell == nil || !*cfg.Notifications.Bell || len(cfg.Notifications.Events) == 0 {
 		t.Fatalf("Notifications = %#v, want defaults", cfg.Notifications)
+	}
+	if cfg.Debug.TimeoutSeconds != 30 || cfg.Debug.Adapters == nil || cfg.Debug.Configurations == nil {
+		t.Fatalf("Debug = %#v, want defaults", cfg.Debug)
 	}
 }
 

@@ -25,6 +25,7 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under `.weazlcode/logs/hooks.jsonl`.
 - Notifications: Optional terminal-bell notifications for task completion, blocked tasks, worker blockers, and repair requests.
 - External Editor: `/edit <path> [line]` opens project files through a configured editor command while keeping paths scoped to the project root.
+- Debug Adapter Foundation: `/debug` inspects configured adapters, and `/debug launch <name>` runs a bounded DAP launch handshake with logs in `/outputs`.
 
 ## Defaults
 
@@ -102,7 +103,7 @@ weazlcode init
 Slash commands drive the IDE. Hit `/` to open the palette.
 
 - Workflow: `/plan draft`, `/plan generate`, `/plan replan`, `/run-task`, `/run-worker`, `/run-workers`, `/run-reviewer`, `/commit-message`, `/export-run`.
-- Views: `/diff`, `/outputs`, `/files`, `/preview`, `/edit`, `/skills`, `/diagnostics`, `/symbols`.
+- Views: `/diff`, `/outputs`, `/files`, `/preview`, `/edit`, `/debug`, `/skills`, `/diagnostics`, `/symbols`.
 - Control: `ctrl+t` trims context, `ctrl+u` nukes active session context, `ctrl+s` saves workspace, and `ctrl+r` / `ctrl+w` opens the workspace picker.
 - Mouse/Copy: `ctrl+m` toggles between terminal copy mode and TUI mouse-scroll mode.
 
@@ -193,6 +194,35 @@ Configure an editor command if you want WeazlCode to hand off a file without lea
 ```
 
 Use `/edit README.md 42` to open a file. `{file}` and `{line}` are replaced in configured args. If no args are configured, WeazlCode uses `+line file`, which works for many terminal editors. If no command is configured, it falls back to `VISUAL` and then `EDITOR`.
+
+## Debug Adapter Foundation
+
+Debugger support is intentionally a foundation right now, not a full interactive debugger UI. Configure adapters and launch configurations, then use `/debug` to inspect them or `/debug launch <name>` to run a bounded launch handshake:
+
+```json
+{
+  "debug": {
+    "timeout_seconds": 30,
+    "adapters": {
+      "go": {
+        "command": "dlv",
+        "args": ["dap"]
+      }
+    },
+    "configurations": [
+      {
+        "name": "app",
+        "type": "go",
+        "request": "launch",
+        "program": "cmd/weazlcode/main.go",
+        "cwd": "."
+      }
+    ]
+  }
+}
+```
+
+The command runs locally, sends a DAP-framed launch request on stdin, captures output, enforces project-root path validation for `program` and `cwd`, and records results in `.weazlcode/logs/debug.jsonl`.
 
 ## Security
 

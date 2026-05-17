@@ -21,6 +21,7 @@ type Config struct {
 	Hooks          Hooks               `json:"hooks"`
 	Notifications  Notifications       `json:"notifications"`
 	Editor         Editor              `json:"editor"`
+	Debug          Debug               `json:"debug"`
 }
 
 type ModelRoles struct {
@@ -89,6 +90,26 @@ type Editor struct {
 	Command string   `json:"command,omitempty"`
 	Args    []string `json:"args,omitempty"`
 	Wait    bool     `json:"wait,omitempty"`
+}
+
+type Debug struct {
+	Adapters       map[string]DebugAdapter `json:"adapters,omitempty"`
+	Configurations []DebugConfiguration    `json:"configurations,omitempty"`
+	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
+}
+
+type DebugAdapter struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+}
+
+type DebugConfiguration struct {
+	Name    string   `json:"name"`
+	Type    string   `json:"type"`
+	Request string   `json:"request,omitempty"`
+	Program string   `json:"program,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Cwd     string   `json:"cwd,omitempty"`
 }
 
 func Load() (Config, string, error) {
@@ -187,6 +208,11 @@ func Default() Config {
 			Events:  defaultNotificationEvents(),
 		},
 		Editor: Editor{},
+		Debug: Debug{
+			Adapters:       map[string]DebugAdapter{},
+			Configurations: []DebugConfiguration{},
+			TimeoutSeconds: 30,
+		},
 	}
 }
 
@@ -265,6 +291,15 @@ func (c *Config) withDefaults() {
 	}
 	if len(c.Notifications.Events) == 0 {
 		c.Notifications.Events = def.Notifications.Events
+	}
+	if c.Debug.Adapters == nil {
+		c.Debug.Adapters = map[string]DebugAdapter{}
+	}
+	if c.Debug.Configurations == nil {
+		c.Debug.Configurations = []DebugConfiguration{}
+	}
+	if c.Debug.TimeoutSeconds <= 0 {
+		c.Debug.TimeoutSeconds = def.Debug.TimeoutSeconds
 	}
 }
 
