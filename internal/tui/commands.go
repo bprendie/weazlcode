@@ -734,13 +734,11 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			if repairErr == nil {
 				return m.applyWorkerPatchWithRepair(repaired, true, repairAttempts+1, applyErrors, nil)
 			}
-			m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, repairErr))
-			m.status = "worker patch apply failed"
-			return m, nil, true
+			message := formatWorkerPatchApplyFailure(applyErrors, repairErr)
+			return m.blockTaskAfterWorkerApplyFailure(task, message)
 		}
-		m.addSystemNote(formatWorkerPatchApplyFailure(applyErrors, nil))
-		m.status = "worker patch apply failed"
-		return m, nil, true
+		message := formatWorkerPatchApplyFailure(applyErrors, nil)
+		return m.blockTaskAfterWorkerApplyFailure(task, message)
 	}
 	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusReviewing); err != nil {
 		m.addSystemNote("Worker patch error: " + err.Error())
@@ -824,6 +822,28 @@ func applyWorkerPatchContent(projectRoot string, patch coding.WorkerPatch) (codi
 		return coding.ApplyFileEdits(projectRoot, patch.Files)
 	}
 	return coding.ApplyPatch(projectRoot, patch.Patch)
+}
+
+func (m model) blockTaskAfterWorkerApplyFailure(task coding.Task, message string) (tea.Model, tea.Cmd, bool) {
+	events, _ := m.store.TaskEvents(task.ID)
+	if err := m.restoreTaskBaseline(task, events, "worker apply failure"); err != nil {
+		m.addSystemNote("Worker cleanup error: " + err.Error())
+		m.status = "worker cleanup failed"
+		return m, nil, true
+	}
+	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+		m.addSystemNote("Worker patch error: " + err.Error())
+		m.status = "worker patch failed"
+		return m, nil, true
+	}
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "worker_error",
+		Message: message,
+	})
+	m.addSystemNote(message)
+	m.status = "worker patch apply failed"
+	return m, nil, true
 }
 
 func (m model) runWorkerModel() (tea.Model, tea.Cmd, bool) {

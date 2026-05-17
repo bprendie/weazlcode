@@ -231,6 +231,20 @@ func (m model) thinkingView() string {
 }
 
 func (m model) processingRole() string {
+	if len(m.workerRuns) > 0 {
+		return "worker"
+	}
+	if m.activeModelRunID != 0 {
+		status := strings.ToLower(m.status)
+		switch {
+		case strings.Contains(status, "reviewer"):
+			return "reviewer"
+		case strings.Contains(status, "worker"):
+			return "worker"
+		default:
+			return "orchestrator"
+		}
+	}
 	status := strings.ToLower(m.status)
 	switch {
 	case strings.Contains(status, "worker"):

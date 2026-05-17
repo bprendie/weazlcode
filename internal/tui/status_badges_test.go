@@ -36,3 +36,19 @@ func TestStatusBadgesNoGit(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusBadgesShowProcessingRoleDuringWorkerRun(t *testing.T) {
+	m := commandTestModel(t)
+	m.cfg.ActiveProvider = "planning-llm"
+	m.cfg.ModelRoles = config.ModelRoles{
+		Orchestrator: "planning-llm",
+		Worker:       "local-worker",
+		Reviewer:     "planning-llm",
+		Summarizer:   "local-worker",
+	}
+	m.workerRuns = map[int]string{1: "task-1"}
+	badges := strings.Join(m.statusBadges(0, 1000), " ")
+	if !strings.Contains(badges, "role:worker") {
+		t.Fatalf("badges missing active worker role: %q", badges)
+	}
+}

@@ -13,9 +13,16 @@ func (m model) statusBadges(contextTokens, budget int) []string {
 		"proj:" + projectBadgeName(m.project.Root),
 		"git:" + branchBadge(m.project.GitRoot, m.project.Branch),
 		"repo:" + dirtyBadge(m.project.GitRoot, m.project.Dirty),
-		"role:" + activeRoleBadge(m.cfg.ActiveProvider, m.cfg.ModelRoles),
+		"role:" + m.statusRoleBadge(),
 		fmt.Sprintf("ctx:%d%%", contextPercent(contextTokens, budget)),
 	}
+}
+
+func (m model) statusRoleBadge() string {
+	if m.hasModelWork() {
+		return m.processingRole()
+	}
+	return activeRoleBadge(m.cfg.ActiveProvider, m.cfg.ModelRoles)
 }
 
 func projectBadgeName(root string) string {

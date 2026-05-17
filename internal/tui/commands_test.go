@@ -114,6 +114,20 @@ func TestThinkingViewShowsProcessingModel(t *testing.T) {
 	}
 }
 
+func TestThinkingViewPrefersActiveWorkerOverStatus(t *testing.T) {
+	m := commandTestModel()
+	m.cfg.Providers["local-worker"] = config.Provider{Type: "vllm", Model: "granite-8b"}
+	m.cfg.ModelRoles.Worker = "local-worker"
+	m.thinking = true
+	m.status = "task reviewing"
+	m.workerRuns = map[int]string{7: "task-1"}
+	m.streamAt = time.Now()
+	view := m.thinkingView()
+	if !strings.Contains(view, "[worker:vllm/granite-8b]") {
+		t.Fatalf("thinking view missing active worker: %q", view)
+	}
+}
+
 func TestCodeChangeChatAutoRoutesToPlanGenerate(t *testing.T) {
 	m := commandTestModel(t)
 	m.input.SetValue("implement a settings page")
@@ -1286,6 +1300,81 @@ func TestSlashWorkerPatchAppliesFileEditsAndMarksReviewing(t *testing.T) {
 	}
 	if string(data) != "new\n" {
 		t.Fatalf("README = %q, want new", data)
+	}
+}
+
+func TestSlashWorkerPatchApplyFailureBlocksAndRestoresBaseline(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch README","summary":"Apply worker patch","tasks":[{"title":"Update README","goal":"Change README text","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	patch := `diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -10,1 +10,1 @@
+-missing
++new
+`
+	rawPatch, err := json.Marshal(coding.WorkerPatch{TaskID: plan.Tasks[0].ID, Summary: "Bad hunk", Patch: patch})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch apply failed" {
+		t.Fatalf("status = %q, want worker patch apply failed", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan after patch: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("task status = %#v ok=%v", plan.Tasks, ok)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "README.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "old\n" {
+		t.Fatalf("README was not restored after apply failure: %q", data)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-2].Type != "output_cleanup" || events[len(events)-1].Type != "worker_error" {
+		t.Fatalf("events = %#v", events)
 	}
 }
 
