@@ -1,6 +1,10 @@
 package tools
 
-import "testing"
+import (
+	"path/filepath"
+	"reflect"
+	"testing"
+)
 
 func TestValidateReadOnlyCommandRejectsVerification(t *testing.T) {
 	if err := validateCommand(commandModeReadOnly, "go", []string{"test", "./..."}); err == nil {
@@ -18,6 +22,7 @@ func TestValidateVerificationCommandAllowsPolicyPresets(t *testing.T) {
 		{name: "go build", cmd: "go", args: []string{"build", "./cmd/weazlcode"}},
 		{name: "npm test", cmd: "npm", args: []string{"test"}},
 		{name: "python pytest", cmd: "python3", args: []string{"-m", "pytest"}},
+		{name: "python smoke", cmd: "python3", args: []string{"app.py", "--smoke"}},
 		{name: "cargo check", cmd: "cargo", args: []string{"check"}},
 		{name: "shellcheck", cmd: "shellcheck", args: []string{"script.sh"}},
 		{name: "make test", cmd: "make", args: []string{"test"}},
@@ -46,5 +51,20 @@ func TestValidateVerificationCommandRejectsUnsafeTargets(t *testing.T) {
 		if err := validateCommand(commandModeVerification, tt.cmd, tt.args); err == nil {
 			t.Fatalf("%s %v was allowed", tt.cmd, tt.args)
 		}
+	}
+}
+
+func TestRunVerificationCommandResolvesConfiguredPython(t *testing.T) {
+	python := filepath.Join(t.TempDir(), "python")
+	tool := NewRunVerificationCommandTool(Limits{PythonBin: python})
+
+	gotName, gotArgs := tool.resolveExecutable(t.TempDir(), "python3", []string{"app.py", "--smoke"})
+	if gotName != python || !reflect.DeepEqual(gotArgs, []string{"app.py", "--smoke"}) {
+		t.Fatalf("python resolution = %q %#v", gotName, gotArgs)
+	}
+
+	gotName, gotArgs = tool.resolveExecutable(t.TempDir(), "pytest", []string{"-q"})
+	if gotName != python || !reflect.DeepEqual(gotArgs, []string{"-m", "pytest", "-q"}) {
+		t.Fatalf("pytest resolution = %q %#v", gotName, gotArgs)
 	}
 }

@@ -139,7 +139,22 @@ func DetectSuspiciousFileRewrites(projectRoot string, files []WorkerFileEdit) []
 		if err != nil {
 			continue
 		}
+		newLines := significantLines(file.Content)
 		oldData, err := os.ReadFile(filepath.Join(projectRoot, path))
+		if placeholder, ok := placeholderRewriteReason(file.Content); ok {
+			rewrite := SuspiciousRewrite{
+				Path:         path,
+				NewLineCount: len(newLines),
+				Reason:       placeholder,
+			}
+			if err == nil {
+				oldLines := significantLines(string(oldData))
+				rewrite.OldLineCount = len(oldLines)
+				rewrite.CommonLinePct = commonLinePercentage(oldLines, newLines)
+			}
+			rewrites = append(rewrites, rewrite)
+			continue
+		}
 		if err != nil {
 			continue
 		}
@@ -147,7 +162,6 @@ func DetectSuspiciousFileRewrites(projectRoot string, files []WorkerFileEdit) []
 		if len(oldLines) < 80 {
 			continue
 		}
-		newLines := significantLines(file.Content)
 		commonPct := commonLinePercentage(oldLines, newLines)
 		if len(newLines) < len(oldLines)/2 || commonPct < 25 {
 			rewrites = append(rewrites, SuspiciousRewrite{
@@ -160,6 +174,32 @@ func DetectSuspiciousFileRewrites(projectRoot string, files []WorkerFileEdit) []
 		}
 	}
 	return rewrites
+}
+
+func placeholderRewriteReason(content string) (string, bool) {
+	lower := strings.ToLower(content)
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "+<") || strings.HasPrefix(line, "-<") {
+			return "file edit contains diff marker residue before markup", true
+		}
+	}
+	sentinels := []string{
+		"existing content of",
+		"existing content omitted",
+		"rest of the file",
+		"existing styles omitted",
+		"styles omitted for brevity",
+		"omitted for brevity",
+		"previous content here",
+		"remaining content unchanged",
+	}
+	for _, sentinel := range sentinels {
+		if strings.Contains(lower, sentinel) {
+			return fmt.Sprintf("file edit contains placeholder sentinel %q instead of real content", sentinel), true
+		}
+	}
+	return "", false
 }
 
 func ApplyPatch(projectRoot, patch string) (PatchApplyResult, error) {

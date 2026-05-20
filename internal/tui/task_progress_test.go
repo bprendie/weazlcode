@@ -33,3 +33,25 @@ func TestTaskProgressBadgeComplete(t *testing.T) {
 		t.Fatalf("taskProgressBadge = %q", got)
 	}
 }
+
+func TestTaskProgressBadgeWithRunningSpinner(t *testing.T) {
+	plan := coding.Plan{Tasks: []coding.Task{
+		{Status: coding.TaskStatusRunning},
+		{Status: coding.TaskStatusPending},
+	}}
+	got := taskProgressBadgeWithSpinner(plan, "*")
+	if !strings.Contains(got, "* 1 running") {
+		t.Fatalf("taskProgressBadgeWithSpinner = %q", got)
+	}
+}
+
+func TestTaskProgressBadgeWithReviewingSpinner(t *testing.T) {
+	plan := coding.Plan{Tasks: []coding.Task{
+		{Status: coding.TaskStatusReviewing},
+		{Status: coding.TaskStatusPending},
+	}}
+	got := taskProgressBadgeWithSpinner(plan, "*")
+	if !strings.Contains(got, "* 1 reviewing") {
+		t.Fatalf("taskProgressBadgeWithSpinner = %q", got)
+	}
+}

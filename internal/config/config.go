@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 const appName = "weazlcode"
@@ -67,6 +69,9 @@ type Skills struct {
 type Workers struct {
 	Concurrency           int `json:"concurrency"`
 	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
+	OutputTokens          int `json:"output_tokens,omitempty"`
+	ArtifactOutputTokens  int `json:"artifact_output_tokens,omitempty"`
+	RunTimeoutSeconds     int `json:"run_timeout_seconds,omitempty"`
 }
 
 type Hooks struct {
@@ -196,6 +201,9 @@ func Default() Config {
 		Workers: Workers{
 			Concurrency:           2,
 			RequestTimeoutSeconds: 300,
+			OutputTokens:          4096,
+			ArtifactOutputTokens:  24576,
+			RunTimeoutSeconds:     900,
 		},
 		Hooks: Hooks{
 			Enabled:        false,
@@ -275,10 +283,19 @@ func (c *Config) withDefaults() {
 		c.Skills.Enabled = def.Skills.Enabled
 	}
 	if c.Workers.Concurrency <= 0 {
-		c.Workers.Concurrency = def.Workers.Concurrency
+		c.Workers.Concurrency = RecommendedWorkerConcurrency(c.ProviderForRole("worker").Type)
 	}
 	if c.Workers.RequestTimeoutSeconds <= 0 {
 		c.Workers.RequestTimeoutSeconds = def.Workers.RequestTimeoutSeconds
+	}
+	if c.Workers.OutputTokens <= 0 {
+		c.Workers.OutputTokens = def.Workers.OutputTokens
+	}
+	if c.Workers.ArtifactOutputTokens <= 0 {
+		c.Workers.ArtifactOutputTokens = def.Workers.ArtifactOutputTokens
+	}
+	if c.Workers.RunTimeoutSeconds <= 0 {
+		c.Workers.RunTimeoutSeconds = def.Workers.RunTimeoutSeconds
 	}
 	if c.Hooks.TimeoutSeconds <= 0 {
 		c.Hooks.TimeoutSeconds = def.Hooks.TimeoutSeconds
@@ -300,6 +317,15 @@ func (c *Config) withDefaults() {
 	}
 	if c.Debug.TimeoutSeconds <= 0 {
 		c.Debug.TimeoutSeconds = def.Debug.TimeoutSeconds
+	}
+}
+
+func RecommendedWorkerConcurrency(providerType string) int {
+	switch strings.ToLower(strings.TrimSpace(providerType)) {
+	case "vllm":
+		return 8
+	default:
+		return 2
 	}
 }
 
@@ -339,6 +365,14 @@ func defaultNotificationEvents() []string {
 
 func defaultSkillPaths() []string {
 	home, err := os.UserHomeDir()
+	if runtime.GOOS == "windows" {
+		appData := windowsAppDataRoot()
+		paths := []string{filepath.Join(appData, "skills")}
+		if err == nil && home != "" {
+			paths = append(paths, filepath.Join(home, ".codex", "skills"))
+		}
+		return paths
+	}
 	if err != nil || home == "" {
 		return []string{".weazlcode/skills", ".agents/skills"}
 	}
@@ -354,6 +388,9 @@ func configPath() string {
 	if p := os.Getenv("WEAZLCODE_CONFIG"); p != "" {
 		return p
 	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(windowsAppDataRoot(), "config", "config.json")
+	}
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, appName, "config.json")
 	}
@@ -365,9 +402,26 @@ func dataDir() string {
 	if p := os.Getenv("WEAZLCODE_DATA"); p != "" {
 		return p
 	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(windowsAppDataRoot(), "vaults")
+	}
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, appName)
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", appName)
+}
+
+func windowsAppDataRoot() string {
+	if p := os.Getenv("WEAZLCODE_HOME"); p != "" {
+		return p
+	}
+	if p := os.Getenv("APPDATA"); p != "" {
+		return filepath.Join(p, appName)
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, appName)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "AppData", "Roaming", appName)
 }

@@ -74,6 +74,9 @@ func TestWriteConfigStoresContextWindow(t *testing.T) {
 	if got.Active().ContextWindow != 16384 {
 		t.Fatalf("ContextWindow = %d, want 16384", got.Active().ContextWindow)
 	}
+	if got.Workers.Concurrency != config.RecommendedWorkerConcurrency("vllm") {
+		t.Fatalf("Workers.Concurrency = %d, want %d", got.Workers.Concurrency, config.RecommendedWorkerConcurrency("vllm"))
+	}
 }
 
 func TestConfigureLLMProviderOpenAI(t *testing.T) {

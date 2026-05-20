@@ -20,7 +20,7 @@ import (
 
 const maxPlanGenerateTokens = 8192
 
-func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
+func (m model) approveLatestPlan(runAfterApproval bool) (tea.Model, tea.Cmd, bool) {
 	plan, ok, err := m.store.LatestPlan(m.session.ID)
 	if err != nil {
 		m.addSystemNote("Approve error: " + err.Error())
@@ -57,7 +57,19 @@ func (m model) approveLatestPlan() (tea.Model, tea.Cmd, bool) {
 	plan.Status = coding.PlanStatusApproved
 	m.addSystemNote(renderPlan(plan))
 	m.status = "plan approved"
+	if runAfterApproval {
+		return m.runParallelWorkers()
+	}
 	return m, nil, true
+}
+
+func approveShouldRun(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "run", "workers", "run-workers", "start", "go":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m model) planValidationCommandText() string {
@@ -516,6 +528,22 @@ func (m model) generatePlanCmd(ctx context.Context, runID int, request string) t
 				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("parse error: %v; repair parse error: %w", initialErr, err)}
 			}
 		}
+		attachSourceCopyContract(&plan, request)
+		if issues := coding.ValidatePlanQuality(plan); len(issues) > 0 {
+			initialErr := fmt.Errorf("plan quality check failed:\n%s", renderPlanQualityIssues(issues))
+			repaired, repairErr := m.repairPlanJSON(ctx, request, raw, initialErr)
+			if repairErr != nil {
+				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("quality error: %v; repair error: %w", initialErr, repairErr)}
+			}
+			plan, err = m.planFromGeneratedJSON(repaired)
+			if err != nil {
+				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("quality error: %v; repair parse error: %w", initialErr, err)}
+			}
+			attachSourceCopyContract(&plan, request)
+			if issues := coding.ValidatePlanQuality(plan); len(issues) > 0 {
+				return planGenerateMsg{runID: runID, request: request, raw: raw, err: fmt.Errorf("quality error: %v; repaired plan still has quality issues:\n%s", initialErr, renderPlanQualityIssues(issues))}
+			}
+		}
 		return planGenerateMsg{runID: runID, request: request, raw: raw, plan: plan}
 	}
 }
@@ -590,15 +618,38 @@ func (m model) planGenerateMessages(request string) []llm.ChatMessage {
 				"You are the WeazlCode orchestrator.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
+				"Critical efficiency rule: if the request is a single static landing page, brochure page, one-page website, README, generated document, or other cohesive non-interactive artifact, return one whole-file artifact task unless the expected output clearly exceeds the configured worker output budget.",
+				"Do not create microtasks for sections, cards, components, CSS modules, or validation just to create parallelism. Parallelism is only useful for genuinely independent deliverables.",
+				"Do not create validation-only worker tasks with empty allowed_paths. Put validation requirements in acceptance_checks on the implementation tasks instead.",
+				"Do not add README, docs, examples, tests, or companion files unless the user explicitly asks for them or they are required to run the requested artifact.",
+				"Modularization north star: generated code should be maintainable modules with clear contracts. Prefer files around 300 lines or less. Files over 300 lines require a concrete reason in the task goal or acceptance_checks; files over 500 lines should usually be split into modules unless the user explicitly requests a single file or the artifact is inherently single-file.",
+				"For interactive apps, games, APIs, CLIs, and tools, prefer module-first plans even when the request sounds like one cohesive artifact: separate domain logic, rendering/UI, persistence/adapters, entrypoint, and smoke/verification paths into small files that independent workers can own. Avoid giant all-in-one files for convenience.",
+				"For generated interactive Python apps/games using pygame, do not return a single main.py task unless the user explicitly asks for one file. Use separate module tasks for entities/rendering/state plus an entrypoint task with --smoke.",
+				"For generated module-first code, task goals must define explicit imports/interfaces between modules. Tell workers to use explicit imports, not wildcard imports such as from module import *, so validation and integration can see stable names.",
+				"For module-first plans, maximize safe parallel draft work: create independent draft module tasks that can rely on explicit interface contracts in their goals, and use depends_on only when a task truly needs completed dependency output. Add a final wiring/smoke task that depends on the drafted modules and fixes integration mismatches.",
+				"Final wiring/smoke tasks must be allowed to edit the entrypoint and the dependency module files they integrate. Do not restrict final integration to only main.py or an entrypoint when interface mismatches may require small edits in drafted modules.",
+				"Dependent code tasks that compose multiple generated modules must also be allowed to edit those dependency module files when small interface additions may be required. Otherwise the worker can only report a blocker instead of making surgical cross-module fixes.",
+				"For generated interactive Python apps/games, include a non-interactive --smoke path in the entrypoint and an acceptance check such as python main.py --smoke. The smoke path should initialize the app, perform one lightweight update/render or health check, and exit before the interactive loop.",
 				"Every task must include a stable unique id such as task-1, task-2, task-3. depends_on must reference those exact ids only.",
 				"Every task must be small enough for the configured local worker capacity and must include explicit allowed_paths.",
 				"Allowed paths must be explicit files or narrow directories. Do not use '.', '*', repo-wide globs, or broad repository scopes.",
-				"When decomposing large files, prefer tasks that create new modules/files without editing shared source files; add a later wiring task for shared files so independent work can run in parallel.",
+				"Choose the fewest tasks that still fit the configured worker. Do not split work just to create parallelism.",
+				"For a single static landing page, brochure page, or content-heavy one-page site, prefer one cohesive artifact task that owns complete index.html and complete styles.css together, plus README.md only if requested. Split by file only when one task would exceed the worker output budget. Do not create separate validation-only tasks; use acceptance_checks. Do not create separate tasks for every section/card unless the user explicitly asks for separate partial files or the page is too large for one worker.",
+				"When decomposing genuinely large files or multi-page apps, prefer tasks that create new modules/files without editing shared source files; add a later wiring task for shared files so independent work can run in parallel.",
+				"For multi-file static websites, generated pages, dashboards, and other document-style outputs, use module-first plans only when the page is large enough to require it: create independent section/component/style files first, then use a final assembly task for the shared output file.",
+				"For multi-file static websites, put HTML fragments under sections/*.html or components/*.html and CSS modules under styles/*.css; avoid root-level throwaway partials like _hero.html unless the existing project already uses that convention.",
+				"HTML fragment/module/card/section tasks must explicitly say the worker must not include doctype, html, head, or body tags. Full index.html tasks must request a complete HTML document.",
+				"CSS module tasks must request plain browser CSS only: no preprocessor-style nested rule blocks, no Sass/Less/PostCSS-only syntax, and no inline style blocks in HTML fragments. Normal descendant selectors, pseudo-classes, and pseudo-elements are allowed.",
+				"Final assembly tasks should own only their final output path such as index.html or styles.css, depend on the fragment/module tasks, and verify the assembled output references the existing assets.",
+				"Do not create long serial chains where many tasks repeatedly edit the same file; that is hostile to small local worker models.",
 				"Goals must be concrete and describe the exact code or doc change expected. Do not return placeholder goals like 'do work', 'make changes', or 'implement feature'.",
-				"Every task must include concrete acceptance_checks that can be reviewed against the diff.",
+				"When the user supplies copy, labels, asset filenames, repo URLs, commands, or other literal text, task goals and acceptance_checks must preserve the exact required strings instead of paraphrasing or summarizing them.",
+				"Never use ellipses or shortened placeholder copy in generated site tasks unless the user explicitly supplied the ellipsis.",
+				"Every task must include concrete acceptance_checks that can be reviewed against the diff. Final assembly tasks must include checks against the assembled output, not only fragment files.",
+				"Final assembly tasks must use completed dependency outputs as source material and must preserve exact copy, image filenames, commands, and URLs from those dependency outputs.",
 				"If a discovered skill is directly relevant, include its exact skill name in the task skills array. Otherwise leave skills empty.",
 				"Use depends_on with task ids only when a task must wait for another task; leave it empty for independent work that can run in parallel.",
-				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
+				"Use only discovered verification commands, or these allowlisted forms: go test/build/vet, npm test/run, python -m pytest/unittest/compileall, python script.py --smoke, pytest, cargo test/build/check/clippy, shellcheck, make test/check/lint/build.",
 				"If no allowlisted verification applies, leave verification empty.",
 			}, "\n"),
 		},
@@ -735,6 +786,12 @@ func (m model) planRepairMessages(request, raw string, parseErr error) []llm.Cha
 				"Use this exact shape: {\"title\":\"...\",\"summary\":\"...\",\"tasks\":[{\"id\":\"task-1\",\"title\":\"...\",\"goal\":\"...\",\"allowed_paths\":[\"...\"],\"forbidden_paths\":[\"...\"],\"context_files\":[\"...\"],\"skills\":[\"...\"],\"depends_on\":[],\"verification\":[\"...\"],\"acceptance_checks\":[{\"description\":\"...\",\"command\":\"...\"}]}]}",
 				"Do not add unknown fields. Every task must include id, title, goal, and allowed_paths. depends_on must reference exact task ids in the same plan.",
 				"Allowed paths must be explicit files or narrow directories. Goals and acceptance checks must be concrete enough for the configured local worker capacity.",
+				"For module-first code plans, do not serialize independent module drafts just because one module will import another later. Draft modules in parallel using explicit interface contracts, then add a final wiring/smoke task that depends on the drafted modules.",
+				"For generated interactive Python apps/games using pygame, do not repair into a single main.py task unless the user explicitly asks for one file. Use separate module tasks for entities/rendering/state plus an entrypoint task with --smoke.",
+				"For generated module-first code, task goals must define explicit imports/interfaces between modules and instruct workers to avoid wildcard imports such as from module import *.",
+				"Final wiring/smoke tasks must include the entrypoint and dependency module files in allowed_paths so interface mismatches can be fixed directly instead of papered over from the entrypoint.",
+				"Dependent code tasks that compose multiple generated modules must include those dependency module files in allowed_paths when small interface additions may be required.",
+				"For generated interactive Python apps/games, include a non-interactive --smoke path in the entrypoint and an acceptance check such as python main.py --smoke.",
 				workerProfile.Instruction,
 				"Verification commands must be allowlisted; leave verification empty if unsure.",
 			}, "\n"),
@@ -765,6 +822,82 @@ func (m model) planFromGeneratedJSON(raw string) (coding.Plan, error) {
 		return coding.Plan{}, err
 	}
 	return plan, nil
+}
+
+const sourceCopyContractPrefix = "Required source copy block (preserve exact wording; layout may change):"
+
+func attachSourceCopyContract(plan *coding.Plan, request string) {
+	copyBlock := sourceCopyBlockFromRequest(request)
+	if copyBlock == "" {
+		return
+	}
+	description := sourceCopyContractPrefix + "\n" + copyBlock
+	for i := range plan.Tasks {
+		if !taskWritesCopyBearingFile(plan.Tasks[i]) {
+			continue
+		}
+		if taskHasAcceptanceDescription(plan.Tasks[i], sourceCopyContractPrefix) {
+			continue
+		}
+		plan.Tasks[i].AcceptanceChecks = append(plan.Tasks[i].AcceptanceChecks, coding.AcceptanceCheck{
+			Description: description,
+		})
+	}
+}
+
+func sourceCopyBlockFromRequest(request string) string {
+	request = strings.TrimSpace(request)
+	if request == "" {
+		return ""
+	}
+	lower := strings.ToLower(request)
+	markers := []string{
+		"required copy:",
+		"supplied copy:",
+		"source copy:",
+		"copy:",
+	}
+	for _, marker := range markers {
+		idx := strings.LastIndex(lower, marker)
+		if idx < 0 {
+			continue
+		}
+		block := strings.TrimSpace(request[idx+len(marker):])
+		if block == "" {
+			continue
+		}
+		if len(block) > 8000 {
+			block = strings.TrimSpace(block[:8000])
+		}
+		return block
+	}
+	return ""
+}
+
+func taskWritesCopyBearingFile(task coding.Task) bool {
+	for _, path := range task.AllowedPaths {
+		lower := strings.ToLower(strings.TrimSpace(path))
+		switch {
+		case strings.HasSuffix(lower, ".html"),
+			strings.HasSuffix(lower, ".htm"),
+			strings.HasSuffix(lower, ".md"),
+			strings.HasSuffix(lower, ".txt"),
+			strings.HasSuffix(lower, ".json"),
+			strings.HasSuffix(lower, ".yaml"),
+			strings.HasSuffix(lower, ".yml"):
+			return true
+		}
+	}
+	return false
+}
+
+func taskHasAcceptanceDescription(task coding.Task, needle string) bool {
+	for _, check := range task.AcceptanceChecks {
+		if strings.Contains(check.Description, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractJSONObject(raw string) string {
@@ -809,7 +942,7 @@ func (m model) tasksCommandText() string {
 	fmt.Fprintf(&b, "Tasks for %s:\n", plan.Title)
 	fmt.Fprintf(&b, "%s\n\n", taskProgressSummary(plan))
 	for i, task := range plan.Tasks {
-		fmt.Fprintf(&b, "%d. [%s] %s\n   %s\n", i+1, task.Status, task.Title, task.Goal)
+		fmt.Fprintf(&b, "%d. [%s] %s\n   %s\n", i+1, m.taskStatusLabel(task.Status), task.Title, task.Goal)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -828,7 +961,7 @@ func (m model) taskDetailCommandText(selector string) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Task %d/%d: %s\n", index+1, len(plan.Tasks), task.Title)
-	fmt.Fprintf(&b, "id: %s\nstatus: %s\nplan: %s\n\nGoal:\n%s\n", task.ID, task.Status, plan.Title, task.Goal)
+	fmt.Fprintf(&b, "id: %s\nstatus: %s\nplan: %s\n\nGoal:\n%s\n", task.ID, m.taskStatusLabel(task.Status), plan.Title, task.Goal)
 	if len(task.AllowedPaths) > 0 {
 		fmt.Fprintf(&b, "\nAllowed paths:\n%s", bulletList(task.AllowedPaths))
 	}
@@ -916,6 +1049,15 @@ func bulletList(items []string) string {
 	return b.String()
 }
 
+func (m model) taskStatusLabel(status string) string {
+	if status == coding.TaskStatusRunning || status == coding.TaskStatusReviewing {
+		if spinnerFrame := strings.TrimSpace(m.working.View()); spinnerFrame != "" {
+			return spinnerFrame + " " + status
+		}
+	}
+	return status
+}
+
 func renderPlan(plan coding.Plan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Plan: %s\nstatus: %s\nid: %s\nupdated: %s\n\n%s",
@@ -947,5 +1089,33 @@ func renderPlan(plan coding.Plan) string {
 			}
 		}
 	}
+	next := planNextActionText(plan)
+	if next != "" {
+		b.WriteString("\n\nNext:\n")
+		b.WriteString(next)
+	}
 	return b.String()
+}
+
+func planNextActionText(plan coding.Plan) string {
+	switch plan.Status {
+	case coding.PlanStatusDraft:
+		return "- Review the task scope, then run `/approve run` to approve and dispatch eligible local workers.\n- Use `/approve` if you want to approve without starting workers yet, or `/plan edit` / `/plan replan` if the plan needs adjustment."
+	case coding.PlanStatusApproved:
+		if hasRunnablePlanTask(plan) {
+			return "- Run `/run-workers` to dispatch eligible local workers, or `/run-task` then `/run-worker` for one task at a time."
+		}
+	case coding.PlanStatusRunning:
+		return "- Use `/tasks`, `/outputs`, `/diff`, and `/review-diff` to inspect progress."
+	}
+	return ""
+}
+
+func hasRunnablePlanTask(plan coding.Plan) bool {
+	for _, task := range plan.Tasks {
+		if task.Status == coding.TaskStatusPending || task.Status == coding.TaskStatusBlocked {
+			return true
+		}
+	}
+	return false
 }

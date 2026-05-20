@@ -87,7 +87,7 @@ func (m model) workerCapacityProfile() workerCapacityProfile {
 		return workerCapacityProfile{
 			Label:        fmt.Sprintf("small %.1fB-class local worker", size),
 			SizeBillions: size,
-			Instruction:  "Assume the worker has limited reasoning and output budget. Split work into tiny, concrete tasks with narrow allowed_paths, minimal context_files, and single-purpose acceptance checks. Prefer create-only module tasks plus a later wiring task for shared files.",
+			Instruction:  "Assume the worker has limited reasoning and output budget. Keep tasks concrete with narrow allowed_paths, minimal context_files, and explicit acceptance checks. For cohesive artifact packets, complete the whole allowed artifact in one pass instead of inventing smaller subtasks.",
 		}
 	case size > 0 && size <= 16:
 		return workerCapacityProfile{

@@ -8,7 +8,10 @@
 /weazlchat
 /weazlcode
 /weazlcode-setup
+/smoketest/
 *.exe
 *.test
 *.out
 /planning_docs/local_modularization_plan.md
+/planning_docs/local_remediation_phase_plan.md
+/planning_docs/local_live_static_site_remediation_plan.md

@@ -33,6 +33,30 @@ func DecodePlanJSON(raw []byte) (Plan, error) {
 }
 
 func ParseWorkerPatchJSON(raw []byte) (WorkerPatch, error) {
+	patch, err := decodeWorkerPatchJSON(raw)
+	if err != nil {
+		sanitized := sanitizeInvalidJSONEscapes(raw)
+		if !bytes.Equal(sanitized, raw) {
+			patch, err = decodeWorkerPatchJSON(sanitized)
+		}
+		if err != nil {
+			if recovered, ok := recoverLooseWorkerPatchJSON(sanitized); ok {
+				patch = recovered
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return WorkerPatch{}, err
+	}
+	patch = NormalizeWorkerPatch(patch)
+	if err := ValidateWorkerPatch(patch); err != nil {
+		return WorkerPatch{}, err
+	}
+	return patch, nil
+}
+
+func decodeWorkerPatchJSON(raw []byte) (WorkerPatch, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var patch WorkerPatch
@@ -42,11 +66,159 @@ func ParseWorkerPatchJSON(raw []byte) (WorkerPatch, error) {
 	if dec.More() {
 		return WorkerPatch{}, fmt.Errorf("worker patch JSON contains trailing data")
 	}
-	patch = NormalizeWorkerPatch(patch)
-	if err := ValidateWorkerPatch(patch); err != nil {
-		return WorkerPatch{}, err
-	}
 	return patch, nil
+}
+
+type jsonStringPair struct {
+	key   string
+	value string
+}
+
+func recoverLooseWorkerPatchJSON(raw []byte) (WorkerPatch, bool) {
+	pairs := scanLooseJSONStringPairs(raw)
+	if len(pairs) == 0 {
+		return WorkerPatch{}, false
+	}
+	var patch WorkerPatch
+	var pendingPath string
+	for _, pair := range pairs {
+		switch pair.key {
+		case "task_id":
+			if patch.TaskID == "" {
+				patch.TaskID = pair.value
+			}
+		case "summary":
+			if patch.Summary == "" {
+				patch.Summary = pair.value
+			}
+		case "patch":
+			if patch.Patch == "" {
+				patch.Patch = pair.value
+			}
+		case "blocker":
+			if patch.Blocker == "" {
+				patch.Blocker = pair.value
+			}
+		case "path":
+			pendingPath = pair.value
+		case "content":
+			if strings.TrimSpace(pendingPath) != "" {
+				patch.Files = append(patch.Files, WorkerFileEdit{
+					Path:    pendingPath,
+					Content: pair.value,
+				})
+				pendingPath = ""
+			}
+		}
+	}
+	return patch, strings.TrimSpace(patch.TaskID) != "" && (len(patch.Files) > 0 || strings.TrimSpace(patch.Patch) != "" || strings.TrimSpace(patch.Blocker) != "")
+}
+
+func scanLooseJSONStringPairs(raw []byte) []jsonStringPair {
+	var pairs []jsonStringPair
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '"' {
+			continue
+		}
+		key, next, ok := readJSONString(raw, i)
+		if !ok {
+			continue
+		}
+		j := skipJSONSpace(raw, next)
+		if j >= len(raw) || raw[j] != ':' {
+			i = next
+			continue
+		}
+		j = skipJSONSpace(raw, j+1)
+		if j >= len(raw) || raw[j] != '"' {
+			i = next
+			continue
+		}
+		value, end, ok := readJSONString(raw, j)
+		if !ok {
+			i = next
+			continue
+		}
+		pairs = append(pairs, jsonStringPair{key: key, value: value})
+		i = end - 1
+	}
+	return pairs
+}
+
+func skipJSONSpace(raw []byte, i int) int {
+	for i < len(raw) {
+		switch raw[i] {
+		case ' ', '\n', '\r', '\t':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func readJSONString(raw []byte, start int) (string, int, bool) {
+	if start >= len(raw) || raw[start] != '"' {
+		return "", start, false
+	}
+	escaped := false
+	for i := start + 1; i < len(raw); i++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch raw[i] {
+		case '\\':
+			escaped = true
+		case '"':
+			var value string
+			if err := json.Unmarshal(raw[start:i+1], &value); err != nil {
+				return "", i + 1, false
+			}
+			return value, i + 1, true
+		}
+	}
+	return "", len(raw), false
+}
+
+func sanitizeInvalidJSONEscapes(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString := false
+	escaped := false
+	for _, b := range raw {
+		if !inString {
+			out = append(out, b)
+			if b == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			if !validJSONEscapeByte(b) {
+				out = append(out, '\\')
+			}
+			out = append(out, b)
+			escaped = false
+			continue
+		}
+		out = append(out, b)
+		switch b {
+		case '\\':
+			escaped = true
+		case '"':
+			inString = false
+		}
+	}
+	return out
+}
+
+func validJSONEscapeByte(b byte) bool {
+	switch b {
+	case '"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u':
+		return true
+	default:
+		return false
+	}
 }
 
 func NormalizeWorkerPatch(patch WorkerPatch) WorkerPatch {
@@ -55,12 +227,32 @@ func NormalizeWorkerPatch(patch WorkerPatch) WorkerPatch {
 	patch.Blocker = strings.TrimSpace(patch.Blocker)
 	for i := range patch.Files {
 		patch.Files[i].Path = strings.TrimSpace(patch.Files[i].Path)
+		patch.Files[i].Content = stripWholeFileMarkdownFence(patch.Files[i].Content)
 	}
 	switch strings.ToLower(patch.Blocker) {
 	case "none", "no", "n/a", "na", "null", "nil":
 		patch.Blocker = ""
 	}
 	return patch
+}
+
+func stripWholeFileMarkdownFence(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if !strings.HasPrefix(trimmed, "```") || !strings.HasSuffix(trimmed, "```") {
+		return content
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 2 {
+		return content
+	}
+	if !strings.HasPrefix(strings.TrimSpace(lines[0]), "```") || strings.TrimSpace(lines[len(lines)-1]) != "```" {
+		return content
+	}
+	body := strings.Join(lines[1:len(lines)-1], "\n")
+	if strings.HasSuffix(content, "\n") {
+		body += "\n"
+	}
+	return body
 }
 
 func ParseReviewVerdictJSON(raw []byte) (ReviewVerdict, error) {

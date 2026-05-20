@@ -13,6 +13,7 @@ type Limits struct {
 	WorkspaceRoots []string
 	MaxOutputChars int
 	MaxFileBytes   int64
+	PythonBin      string
 }
 
 func (l Limits) outputLimit() int {

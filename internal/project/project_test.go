@@ -93,6 +93,19 @@ func TestDetectHonorsWeazlcodeIgnore(t *testing.T) {
 	}
 }
 
+func TestSafeStateDirName(t *testing.T) {
+	tests := map[string]string{
+		"Weazl Code!": "Weazl-Code",
+		"___":         "project",
+		"app_01":      "app_01",
+	}
+	for in, want := range tests {
+		if got := safeStateDirName(in); got != want {
+			t.Fatalf("safeStateDirName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)

@@ -247,15 +247,37 @@ func TestReviewApproveBlockedByLocalGuardrail(t *testing.T) {
 		t.Fatal("review handled = false")
 	}
 	got := updated.(model)
-	if got.status != "review guardrail" {
-		t.Fatalf("status = %q, want review guardrail", got.status)
+	if got.status != "repair requested" {
+		t.Fatalf("status = %q, want repair requested", got.status)
 	}
 	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if events[len(events)-1].Type != "review_guardrail" {
+	if !taskEventsContainType(events, "review_guardrail") || events[len(events)-1].Type != "repair_requested" {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestReviewApprovalGuardrailRequiresSourceCopy(t *testing.T) {
+	m, root := commandTestModelWithReviewingTask(t)
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<h1>Product</h1><p>Short copy.</p>\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	plan.Tasks[0].AllowedPaths = []string{"index.html"}
+	plan.Tasks[0].AcceptanceChecks = []coding.AcceptanceCheck{{
+		Description: sourceCopyContractPrefix + "\nThe exact product paragraph must survive the worker handoff.",
+	}}
+	if err := m.store.SavePlan(plan); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	issues := m.reviewApprovalIssues(plan.Tasks[0])
+	if !containsSubstring(issues, "exact product paragraph") {
+		t.Fatalf("issues = %#v", issues)
 	}
 }
 
@@ -307,8 +329,8 @@ func TestReviewNeedsFixShorthandRequestsRepair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
-	if string(data) != "old\n" {
-		t.Fatalf("README was not restored after needs-fix: %q", data)
+	if string(data) != "new\n" {
+		t.Fatalf("README was not preserved for repair after needs-fix: %q", data)
 	}
 }
 
@@ -334,7 +356,7 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 8 || events[6].Type != "output_cleanup" || events[7].Type != "repair_requested" {
+	if len(events) != 7 || events[6].Type != "repair_requested" {
 		t.Fatalf("events = %#v", events)
 	}
 	updated, _, handled = m.handleSlashCommand("/run-task")
@@ -356,17 +378,86 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 10 || events[8].Type != "task_baseline" || events[9].Type != "repair_start" {
+	if len(events) != 9 || events[7].Type != "task_baseline" || events[8].Type != "repair_start" {
 		t.Fatalf("events = %#v", events)
 	}
-	if !strings.Contains(string(events[9].Payload), "Repair focus") || !strings.Contains(string(events[9].Payload), "Use the requested wording only") {
-		t.Fatalf("repair payload = %s", events[9].Payload)
+	if !strings.Contains(string(events[8].Payload), "Repair focus") || !strings.Contains(string(events[8].Payload), "Use the requested wording only") {
+		t.Fatalf("repair payload = %s", events[8].Payload)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
 	for _, want := range []string{"repair_request", "repair_packet"} {
 		if !kinds[want] {
 			t.Fatalf("artifact %q missing from %#v", want, kinds)
 		}
+	}
+}
+
+func TestReviewNeedsFixPreservesCreatedFileForRepair(t *testing.T) {
+	root := t.TempDir()
+	runTestGit(t, root, "init")
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Create game","summary":"Create one file","tasks":[{"title":"Create blackjack","goal":"Create blackjack.py","allowed_paths":["blackjack.py"],"acceptance_checks":[{"description":"blackjack.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Created broken game",
+		Files:   []coding.WorkerFileEdit{{Path: "blackjack.py", Content: "print('broken but repairable')\n"}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	m = updated.(model)
+	rawReview := `{"verdict":"needs_fix","summary":"Make it graphical","issues":["Use pygame rendering"]}`
+	updated, _, handled = m.handleSlashCommand("/review " + rawReview)
+	if !handled {
+		t.Fatal("review handled = false")
+	}
+	got := updated.(model)
+	data, err := os.ReadFile(filepath.Join(root, "blackjack.py"))
+	if err != nil {
+		t.Fatalf("generated file was not preserved for repair: %v", err)
+	}
+	if !strings.Contains(string(data), "broken but repairable") {
+		t.Fatalf("generated file changed unexpectedly: %q", data)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if taskEventsContainType(events, "output_cleanup") {
+		t.Fatalf("needs-fix should not clean up repair target: %#v", events)
+	}
+	if events[len(events)-1].Type != "repair_requested" {
+		t.Fatalf("events = %#v", events)
 	}
 }
 
@@ -406,4 +497,22 @@ func TestSlashReviewNeedsFixCapsRepairLoop(t *testing.T) {
 	if got.status != "no runnable task" {
 		t.Fatalf("status = %q, want no runnable task", got.status)
 	}
+}
+
+func taskEventsContainType(events []coding.TaskEvent, eventType string) bool {
+	for _, event := range events {
+		if event.Type == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSubstring(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }

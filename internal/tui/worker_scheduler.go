@@ -20,7 +20,7 @@ func (m model) firstRunnableTask(tasks []coding.Task) (coding.Task, bool, error)
 		if err != nil {
 			return coding.Task{}, false, err
 		}
-		if repairableTask(events) {
+		if repairableTask(task, events) {
 			return task, true, nil
 		}
 		if retryableWorkerErrorTask(events) {
@@ -93,7 +93,7 @@ func (m model) parallelRunnableTasks(tasks []coding.Task, limit int) ([]coding.T
 		if err != nil {
 			return false, err
 		}
-		return retryableWorkerErrorTask(events) || repairableTask(events), nil
+		return retryableWorkerErrorTask(events) || repairableTask(task, events), nil
 	})
 }
 
@@ -104,10 +104,10 @@ func parallelRunnableTasksWithRetry(tasks []coding.Task, limit int, retryable fu
 	done := map[string]bool{}
 	activeOrSelected := map[string]bool{}
 	for _, task := range tasks {
-		if task.Status == coding.TaskStatusDone {
+		if task.Status == coding.TaskStatusDone || task.Status == coding.TaskStatusReviewing {
 			done[task.ID] = true
 		}
-		if task.Status == coding.TaskStatusRunning || task.Status == coding.TaskStatusReviewing {
+		if task.Status == coding.TaskStatusRunning {
 			for _, path := range task.AllowedPaths {
 				activeOrSelected[normalizeTaskPathForOverlap(path)] = true
 			}
@@ -199,8 +199,8 @@ func firstRunningTask(tasks []coding.Task) (coding.Task, bool) {
 	return coding.Task{}, false
 }
 
-func repairableTask(events []coding.TaskEvent) bool {
-	if repairAttemptCount(events) >= maxRepairAttempts {
+func repairableTask(task coding.Task, events []coding.TaskEvent) bool {
+	if repairAttemptCount(events) >= repairAttemptLimit(task, events) {
 		return false
 	}
 	repairRequested := false
@@ -225,17 +225,46 @@ func repairableTask(events []coding.TaskEvent) bool {
 	return false
 }
 
+func repairAttemptLimit(task coding.Task, events []coding.TaskEvent) int {
+	if singleFileGeneratedArtifactTask(task) && artifactValidationFailureCount(events) > 0 {
+		return maxArtifactRepairAttempts
+	}
+	return maxRepairAttempts
+}
+
 func retryableWorkerErrorTask(events []coding.TaskEvent) bool {
 	_, ok := latestWorkerError(events)
 	return ok
 }
 
+func artifactValidationFailureCount(events []coding.TaskEvent) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == "artifact_validation" {
+			count++
+		}
+	}
+	return count
+}
+
 func latestWorkerError(events []coding.TaskEvent) (string, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		switch events[i].Type {
-		case "worker_error", "worker_timeout", "worker_json_error":
+		case "worker_error", "worker_timeout", "worker_json_error", "worker_rejected", "artifact_validation":
 			return strings.TrimSpace(events[i].Message), true
 		case "worker_model", "worker_patch", "worker_blocker", "repair_start", "repair_limit", "reviewer_verdict":
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func latestArtifactValidation(events []coding.TaskEvent) (string, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "artifact_validation":
+			return strings.TrimSpace(events[i].Message), true
+		case "worker_patch", "worker_blocker", "repair_limit":
 			return "", false
 		}
 	}

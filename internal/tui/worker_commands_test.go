@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 
@@ -33,6 +34,45 @@ func TestWorkerContextFileCharBudgetScalesWithContextWindow(t *testing.T) {
 	}
 }
 
+func TestWorkerOutputTokensUseArtifactBudgetForWholeFileTasks(t *testing.T) {
+	m := commandTestModel(t)
+	m.cfg.Workers.OutputTokens = 4096
+	m.cfg.Workers.ArtifactOutputTokens = 24576
+	worker := m.cfg.Providers[m.cfg.ModelRoles.Worker]
+	worker.ContextWindow = 32768
+	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
+
+	normal := coding.TaskPacket{TaskID: "task-1", Goal: "Update README.", AllowedPaths: []string{"README.md"}}
+	if got := m.workerOutputTokens(normal); got != 4096 {
+		t.Fatalf("normal output tokens = %d, want 4096", got)
+	}
+	artifact := coding.TaskPacket{TaskID: "task-2", Goal: "Create a complete landing page website.", AllowedPaths: []string{"index.html", "styles.css"}}
+	if got := m.workerOutputTokens(artifact); got != 24576 {
+		t.Fatalf("artifact output tokens = %d, want 24576", got)
+	}
+}
+
+func TestWorkerPacketMarksSingleFileGeneratedArtifact(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	packet, err := m.buildWorkerPacket(coding.Task{
+		ID:           "task-1",
+		PlanID:       "plan",
+		Title:        "Create pygame blackjack",
+		Goal:         "Build a standalone Python game.",
+		Status:       coding.TaskStatusPending,
+		AllowedPaths: []string{"blackjack.py"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	combined := packet.WorkerProfile + "\n" + packet.ContextPolicy.Instruction
+	if !strings.Contains(combined, "single-file generated artifact") || !strings.Contains(combined, "files[] with complete content") {
+		t.Fatalf("packet did not include single-file artifact guidance:\n%s", combined)
+	}
+}
+
 func TestSlashPacketCommand(t *testing.T) {
 	m := commandTestModel(t)
 	updated, _, handled := m.handleSlashCommand("/plan draft Add packet")
@@ -49,7 +89,7 @@ func TestSlashPacketCommand(t *testing.T) {
 	if !strings.Contains(view, `"tools_allowed"`) || !strings.Contains(view, `"apply_patch"`) {
 		t.Fatalf("viewport missing packet JSON: %q", view)
 	}
-	if !strings.Contains(view, `"context_policy"`) || !strings.Contains(view, `"tool_requested"`) {
+	if !strings.Contains(view, `"context_policy"`) || !strings.Contains(view, `"provided"`) {
 		t.Fatalf("viewport missing context policy: %q", view)
 	}
 }
@@ -140,6 +180,52 @@ func TestBuildWorkerPacketIncludesAttachedSkills(t *testing.T) {
 	}
 }
 
+func TestBuildWorkerPacketIncludesExistingAllowedFileContent(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<main>old</main>\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	packet, err := m.buildWorkerPacket(coding.Task{
+		ID:           "task-1",
+		PlanID:       "plan-1",
+		Title:        "Task",
+		Goal:         "Edit index.html.",
+		Status:       coding.TaskStatusPending,
+		AllowedPaths: []string{"index.html"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	if len(packet.ContextFiles) != 1 || packet.ContextFiles[0].Path != "index.html" || packet.ContextFiles[0].Content != "<main>old</main>\n" {
+		t.Fatalf("context files = %#v", packet.ContextFiles)
+	}
+	if packet.ContextPolicy.Mode != "provided" || len(packet.ContextPolicy.RequestTools) != 0 {
+		t.Fatalf("context policy = %#v", packet.ContextPolicy)
+	}
+}
+
+func TestBuildWorkerPacketIgnoresMissingAllowedFileContext(t *testing.T) {
+	root := t.TempDir()
+	m := commandTestModel(t)
+	m.project.Root = root
+	packet, err := m.buildWorkerPacket(coding.Task{
+		ID:           "task-1",
+		PlanID:       "plan-1",
+		Title:        "Task",
+		Goal:         "Create index.html.",
+		Status:       coding.TaskStatusPending,
+		AllowedPaths: []string{"index.html"},
+	})
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	if len(packet.ContextFiles) != 0 {
+		t.Fatalf("context files = %#v", packet.ContextFiles)
+	}
+}
+
 func TestRunParallelWorkersStartsIndependentTasks(t *testing.T) {
 	m := commandTestModel(t)
 	raw := `{"title":"Parallel","summary":"Run independent tasks","tasks":[{"id":"task-a","title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]},{"id":"task-b","title":"B","goal":"Update docs/guide.md to mention B.","allowed_paths":["docs/guide.md"],"acceptance_checks":[{"description":"guide mentions B"}]},{"id":"task-c","title":"C","goal":"Update internal/app.go to mention C.","allowed_paths":["internal/app.go"],"depends_on":["task-a"],"acceptance_checks":[{"description":"app mentions C"}]}]}`
@@ -198,17 +284,222 @@ func TestParallelRunnableTasksRespectsDependenciesAndOverlap(t *testing.T) {
 	}
 }
 
+func TestParallelRunnableTasksTreatsReviewingAsWorkerComplete(t *testing.T) {
+	tasks := []coding.Task{
+		{ID: "a", Status: coding.TaskStatusReviewing, AllowedPaths: []string{"index.html"}},
+		{ID: "b", Status: coding.TaskStatusPending, AllowedPaths: []string{"index.html"}, DependsOn: []string{"a"}},
+		{ID: "c", Status: coding.TaskStatusPending, AllowedPaths: []string{"styles.css"}},
+	}
+	got := parallelRunnableTasks(tasks, 3)
+	ids := make([]string, 0, len(got))
+	for _, task := range got {
+		ids = append(ids, task.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"b", "c"}) {
+		t.Fatalf("selected ids = %#v", ids)
+	}
+}
+
+func TestContinueAutonomousRunDispatchesWorkersBeforeReview(t *testing.T) {
+	root := t.TempDir()
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	m.cfg.Workers.Concurrency = 3
+	raw := `{"title":"Pipeline","summary":"Keep workers moving","tasks":[{"id":"task-a","title":"A","goal":"Create index.html base.","allowed_paths":["index.html"],"acceptance_checks":[{"description":"index exists"}]},{"id":"task-b","title":"B","goal":"Extend index.html.","allowed_paths":["index.html"],"depends_on":["task-a"],"acceptance_checks":[{"description":"index extended"}]},{"id":"task-c","title":"C","goal":"Create styles.css.","allowed_paths":["styles.css"],"acceptance_checks":[{"description":"styles exist"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	if err := m.store.UpdateTaskStatus("task-a", coding.TaskStatusReviewing); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	m.startAutonomousRun()
+	updated, cmd := m.continueAutonomousRun(nil)
+	got := updated.(model)
+	if cmd == nil {
+		t.Fatal("cmd = nil, want worker dispatch")
+	}
+	if got.status != "running 2 worker(s)" || len(got.workerRuns) != 2 {
+		t.Fatalf("status/runs = %q/%#v", got.status, got.workerRuns)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	status := map[string]string{}
+	for _, task := range plan.Tasks {
+		status[task.ID] = task.Status
+	}
+	if status["task-b"] != coding.TaskStatusRunning || status["task-c"] != coding.TaskStatusRunning {
+		t.Fatalf("task statuses = %#v", status)
+	}
+}
+
+func TestContinueAutonomousRunFailsAfterRunTimeout(t *testing.T) {
+	m := commandTestModel(t)
+	m.cfg.Workers.RunTimeoutSeconds = 1
+	raw := `{"title":"Timeout","summary":"Stop slow runs","tasks":[{"id":"task-a","title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	m.startAutonomousRun()
+	m.autonomousRunStarted = time.Now().Add(-2 * time.Second)
+	updated, _ = m.continueAutonomousRun(nil)
+	got := updated.(model)
+	if got.autonomousRun || got.status != "run timeout" {
+		t.Fatalf("autonomous/status = %v/%q", got.autonomousRun, got.status)
+	}
+	plan, ok, err := got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if plan.Status != coding.PlanStatusBlocked || plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("plan status = %s task = %s", plan.Status, plan.Tasks[0].Status)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	foundTimeout := false
+	for _, event := range events {
+		if event.Type == "run_timeout" {
+			foundTimeout = true
+			break
+		}
+	}
+	if !foundTimeout {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func TestWorkerPatchMessages(t *testing.T) {
-	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, ToolsAllowed: []string{"apply_patch"}}
+	packet := coding.TaskPacket{Role: "worker", TaskID: "task-1", PlanID: "plan-1", Goal: "Edit README", AllowedPaths: []string{"README.md"}, WorkerProfile: "Artifact contract: HTML fragments must not include doctype/html/head/body.", ToolsAllowed: []string{"apply_patch"}}
 	messages := workerPatchMessages(packet)
 	if len(messages) != 2 {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "files", "unified diff", `"task_id": "task-1"`, "README.md"} {
+	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "files", "unified diff", "For existing files", "preserve all unrelated content", "Follow the task packet artifact contract exactly", "HTML fragments must not include doctype/html/head/body", "preserve their exact copy", "Do not shorten user-provided copy with ellipses", "replace them with real task output", "diff marker residue", "Never replace real existing file content with placeholders", "explicit imports between local modules", "Do not use wildcard imports", `"task_id": "task-1"`, "README.md"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("worker messages missing %q:\n%s", want, combined)
 		}
+	}
+}
+
+func TestBuildWorkerPacketAddsArtifactContracts(t *testing.T) {
+	m := commandTestModel(t)
+	tests := []struct {
+		name string
+		task coding.Task
+		want []string
+	}{
+		{
+			name: "html fragment",
+			task: coding.Task{ID: "task-1", PlanID: "plan-1", Title: "Hero", Goal: "Create hero fragment.", Status: coding.TaskStatusPending, AllowedPaths: []string{"sections/hero.html"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "hero exists"}}},
+			want: []string{"HTML fragment/module only", "Do not include <!doctype>, <html>, <head>, or <body>"},
+		},
+		{
+			name: "final html",
+			task: coding.Task{ID: "task-2", PlanID: "plan-1", Title: "Assemble", Goal: "Assemble final page.", Status: coding.TaskStatusPending, AllowedPaths: []string{"index.html"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "index exists"}}},
+			want: []string{"index.html is the final assembled page", "complete browser-openable HTML document"},
+		},
+		{
+			name: "css",
+			task: coding.Task{ID: "task-3", PlanID: "plan-1", Title: "CSS", Goal: "Create styles.", Status: coding.TaskStatusPending, AllowedPaths: []string{"styles/cards.css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "css exists"}}},
+			want: []string{"plain browser CSS only", "Do not use preprocessor-style nested rule blocks", "pseudo-elements are allowed"},
+		},
+		{
+			name: "generated python module",
+			task: coding.Task{ID: "task-4", PlanID: "plan-1", Title: "Bird module", Goal: "Create a pygame bird module.", Status: coding.TaskStatusPending, AllowedPaths: []string{"bird.py"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "bird exists"}}},
+			want: []string{"Maintainability contract", "Module contract", "use explicit imports", "Do not use wildcard imports"},
+		},
+		{
+			name: "generated python entrypoint",
+			task: coding.Task{ID: "task-5", PlanID: "plan-1", Title: "Main entrypoint", Goal: "Create a pygame game loop with smoke mode.", Status: coding.TaskStatusPending, AllowedPaths: []string{"main.py"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "python main.py --smoke exits"}}},
+			want: []string{"Maintainability contract", "Module contract", "Smoke contract", "Entrypoint contract", "smoke_test()", "event-loop variables"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packet, err := m.buildWorkerPacket(tt.task)
+			if err != nil {
+				t.Fatalf("buildWorkerPacket: %v", err)
+			}
+			combined := packet.WorkerProfile + "\n" + packet.ContextPolicy.Instruction
+			for _, want := range tt.want {
+				if !strings.Contains(combined, want) {
+					t.Fatalf("packet missing %q:\n%s", want, combined)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildWorkerPacketIncludesDoneDependencyOutputsAsContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "sections"), 0o755); err != nil {
+		t.Fatalf("MkdirAll sections: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "styles"), 0o755); err != nil {
+		t.Fatalf("MkdirAll styles: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sections", "hero.html"), []byte("<section>Exact hero copy</section>\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile hero: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles", "base.css"), []byte(":root { color: white; }\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile css: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.session.ProjectRoot = root
+	plan := coding.Plan{
+		ID:          "plan-1",
+		SessionID:   m.session.ID,
+		ProjectRoot: root,
+		Title:       "Assemble site",
+		Summary:     "Assemble dependency outputs.",
+		Status:      coding.PlanStatusApproved,
+		Tasks: []coding.Task{
+			{ID: "hero", PlanID: "plan-1", Title: "Hero", Goal: "Create hero fragment without doctype, html, head, or body.", Status: coding.TaskStatusDone, AllowedPaths: []string{"sections/hero.html"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "hero exists"}}},
+			{ID: "base-css", PlanID: "plan-1", Title: "Base CSS", Goal: "Create base CSS.", Status: coding.TaskStatusDone, AllowedPaths: []string{"styles/base.css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "css exists"}}},
+			{ID: "assemble", PlanID: "plan-1", Title: "Assemble page", Goal: "Assemble final page from dependency outputs.", Status: coding.TaskStatusPending, AllowedPaths: []string{"index.html"}, DependsOn: []string{"hero", "base-css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "index includes dependency outputs"}}},
+		},
+	}
+	if err := m.store.SavePlan(plan); err != nil {
+		t.Fatalf("SavePlan: %v", err)
+	}
+	packet, err := m.buildWorkerPacket(plan.Tasks[2])
+	if err != nil {
+		t.Fatalf("buildWorkerPacket: %v", err)
+	}
+	contextByPath := map[string]string{}
+	for _, file := range packet.ContextFiles {
+		contextByPath[file.Path] = file.Content
+	}
+	if contextByPath["sections/hero.html"] != "<section>Exact hero copy</section>\n" {
+		t.Fatalf("hero dependency context missing: %#v", packet.ContextFiles)
+	}
+	if contextByPath["styles/base.css"] != ":root { color: white; }\n" {
+		t.Fatalf("css dependency context missing: %#v", packet.ContextFiles)
+	}
+	if _, ok := contextByPath["index.html"]; ok {
+		t.Fatalf("missing create target should not be included as context: %#v", packet.ContextFiles)
 	}
 }
 
@@ -424,6 +715,65 @@ func TestSlashWorkerPatchBlockerMarksTaskBlocked(t *testing.T) {
 	}
 }
 
+func TestSlashWorkerPatchIgnoresNoneBlocker(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("old\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m := commandTestModel(t)
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"None blocker","summary":"Handle placeholder blocker","tasks":[{"title":"Update README","goal":"Update README.md content.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README changed"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	raw, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Updated README",
+		Blocker: "None",
+		Files:   []coding.WorkerFileEdit{{Path: "README.md", Content: "new\n"}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(raw))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != coding.TaskStatusReviewing {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
+	}
+}
+
 func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	got, root := commandTestModelWithReviewingTask(t)
 	if got.status != "task reviewing" {
@@ -632,6 +982,13 @@ func TestSlashWorkerPatchRejectsPathsOutsideTaskScope(t *testing.T) {
 	if got.status != "worker patch rejected" {
 		t.Fatalf("status = %q, want worker patch rejected", got.status)
 	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan after rejection: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("task status after rejection = %#v ok=%v, want blocked", plan.Tasks, ok)
+	}
 	if !strings.Contains(got.viewport.View(), "Returned paths:") || !strings.Contains(got.viewport.View(), "Allowed paths:") {
 		t.Fatalf("viewport missing rejection detail: %q", got.viewport.View())
 	}
@@ -641,6 +998,9 @@ func TestSlashWorkerPatchRejectsPathsOutsideTaskScope(t *testing.T) {
 	}
 	if events[len(events)-1].Type != "worker_rejected" {
 		t.Fatalf("events = %#v", events)
+	}
+	if !retryableWorkerErrorTask(events) {
+		t.Fatalf("worker_rejected task is not retryable: %#v", events)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(root, ".weazlcode", "runs", got.session.ID))
 	if !kinds["worker_rejected"] {
@@ -697,6 +1057,13 @@ func TestSlashWorkerPatchRejectsSuspiciousFullFileRewrite(t *testing.T) {
 	if got.status != "worker patch rejected" {
 		t.Fatalf("status = %q, want worker patch rejected", got.status)
 	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan after rejection: %v", err)
+	}
+	if !ok || plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("task status after rejection = %#v ok=%v, want blocked", plan.Tasks, ok)
+	}
 	if !strings.Contains(got.viewport.View(), "suspicious full-file rewrite") {
 		t.Fatalf("viewport missing rewrite rejection: %q", got.viewport.View())
 	}
@@ -706,6 +1073,958 @@ func TestSlashWorkerPatchRejectsSuspiciousFullFileRewrite(t *testing.T) {
 	}
 	if string(data) != oldContent {
 		t.Fatalf("README changed despite rejection")
+	}
+}
+
+func TestSlashWorkerPatchAllowsArtifactFullFileRewrite(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	var oldContent string
+	for i := 0; i < 100; i++ {
+		oldContent += fmt.Sprintf("line %03d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(oldContent), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles.css"), []byte("body { color: black; }\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile styles: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Landing page","summary":"Create artifact","tasks":[{"id":"artifact","title":"Build landing page","goal":"Create a complete cohesive landing page artifact.","allowed_paths":["index.html","styles.css"],"acceptance_checks":[{"description":"index and styles are complete"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Rewrite artifact",
+		Files: []coding.WorkerFileEdit{
+			{Path: "index.html", Content: "<!doctype html>\n<html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>new artifact</main></body></html>\n"},
+			{Path: "styles.css", Content: "body { color: white; background: black; }\n"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan after patch: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusReviewing {
+		t.Fatalf("task status = %s, want reviewing", plan.Tasks[0].Status)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil {
+		t.Fatalf("ReadFile index: %v", err)
+	}
+	if !strings.Contains(string(data), "new artifact") {
+		t.Fatalf("index was not rewritten: %q", data)
+	}
+}
+
+func TestSlashWorkerPatchRunsArtifactValidationBeforeReview(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Landing page","summary":"Create artifact","tasks":[{"id":"artifact","title":"Build landing page","goal":"Create a complete cohesive landing page artifact.","allowed_paths":["index.html","styles.css"],"acceptance_checks":[{"description":"index and styles are complete"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Invalid artifact",
+		Files: []coding.WorkerFileEdit{
+			{Path: "index.html", Content: "<!doctype html>\n<html><head><style>body{}</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>new artifact</main></body></html>\n"},
+			{Path: "styles.css", Content: ".card: hover { color: red; }\n"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "artifact validation failed" {
+		t.Fatalf("status = %q, want artifact validation failed", got.status)
+	}
+	plan, ok, err = got.store.LatestPlan(got.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan after patch: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusBlocked {
+		t.Fatalf("task status = %s, want blocked", plan.Tasks[0].Status)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	foundValidation := false
+	for _, event := range events {
+		if event.Type == "artifact_validation" {
+			foundValidation = true
+			if !strings.Contains(event.Message, "inline <style>") || !strings.Contains(event.Message, "pseudo-selector") {
+				t.Fatalf("validation message = %q", event.Message)
+			}
+		}
+	}
+	if !foundValidation {
+		t.Fatalf("events = %#v", events)
+	}
+	if !retryableWorkerErrorTask(events) {
+		t.Fatalf("artifact validation should be retryable: %#v", events)
+	}
+}
+
+func TestArtifactValidationEscalatesAfterRepeatedLocalFailures(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Landing page","summary":"Create artifact","tasks":[{"id":"artifact","title":"Build landing page","goal":"Create a complete cohesive landing page artifact.","allowed_paths":["index.html","styles.css"],"acceptance_checks":[{"description":"index and styles are complete"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	invalidPatch := func(taskID string) string {
+		rawPatch, err := json.Marshal(coding.WorkerPatch{
+			TaskID:  taskID,
+			Summary: "Invalid artifact",
+			Files: []coding.WorkerFileEdit{
+				{Path: "index.html", Content: "<!doctype html>\n<html><head><style>body{}</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>new artifact</main></body></html>\n"},
+				{Path: "styles.css", Content: ".card: hover { color: red; }\n"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		return string(rawPatch)
+	}
+	for attempt := 1; attempt <= maxLocalArtifactValidationRepairPasses; attempt++ {
+		updated, _, handled = m.handleSlashCommand("/run-task")
+		if !handled {
+			t.Fatalf("run-task handled = false on attempt %d", attempt)
+		}
+		m = updated.(model)
+		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch("artifact"))
+		if !handled {
+			t.Fatalf("worker-patch handled = false on attempt %d", attempt)
+		}
+		m = updated.(model)
+	}
+	if m.status != "artifact validation escalated" {
+		t.Fatalf("status = %q, want artifact validation escalated", m.status)
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusReviewing {
+		t.Fatalf("task status = %s, want reviewing", plan.Tasks[0].Status)
+	}
+	events, err := m.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if artifactValidationFailureCount(events) != maxLocalArtifactValidationRepairPasses || !taskEventsContainType(events, "artifact_validation_escalated") {
+		t.Fatalf("events = %#v", events)
+	}
+	issues := m.reviewApprovalIssues(plan.Tasks[0])
+	if !containsSubstring(issues, "local artifact validation is still failing") {
+		t.Fatalf("review approval issues = %#v", issues)
+	}
+}
+
+func TestDeterministicArtifactValidationGetsMoreLocalRepairPasses(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Script","summary":"Create Python artifact","tasks":[{"id":"script","title":"Create script","goal":"Create a standalone Python script.","allowed_paths":["app.py"],"acceptance_checks":[{"description":"app.py compiles"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	invalidPatch := func() string {
+		rawPatch, err := json.Marshal(coding.WorkerPatch{
+			TaskID:  "script",
+			Summary: "Invalid Python",
+			Files:   []coding.WorkerFileEdit{{Path: "app.py", Content: "def broken(:\n    pass\n"}},
+		})
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		return string(rawPatch)
+	}
+	for attempt := 1; attempt < maxDeterministicArtifactRepairPasses; attempt++ {
+		updated, _, handled = m.handleSlashCommand("/run-task")
+		if !handled {
+			t.Fatalf("run-task handled = false on attempt %d", attempt)
+		}
+		m = updated.(model)
+		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch())
+		if !handled {
+			t.Fatalf("worker-patch handled = false on attempt %d", attempt)
+		}
+		m = updated.(model)
+		if m.status != "artifact validation failed" {
+			t.Fatalf("attempt %d status = %q, want local artifact validation failed", attempt, m.status)
+		}
+		plan, ok, err := m.store.LatestPlan(m.session.ID)
+		if err != nil || !ok {
+			t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+		}
+		if plan.Tasks[0].Status != coding.TaskStatusBlocked {
+			t.Fatalf("attempt %d task status = %s, want blocked", attempt, plan.Tasks[0].Status)
+		}
+	}
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false on final attempt")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch())
+	if !handled {
+		t.Fatal("worker-patch handled = false on final attempt")
+	}
+	m = updated.(model)
+	if m.status != "artifact validation escalated" {
+		t.Fatalf("status = %q, want artifact validation escalated", m.status)
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if plan.Tasks[0].Status != coding.TaskStatusReviewing {
+		t.Fatalf("task status = %s, want reviewing", plan.Tasks[0].Status)
+	}
+}
+
+func TestArtifactValidationChecksSourceCopyAndAssets(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hero.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile hero: %v", err)
+	}
+	m.project.Root = root
+	task := coding.Task{
+		ID:           "artifact",
+		PlanID:       "plan",
+		Title:        "Build landing page with image assets",
+		Goal:         "Create a complete static website using image assets.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"index.html", "styles.css"},
+		AcceptanceChecks: []coding.AcceptanceCheck{{
+			Description: sourceCopyContractPrefix + "\nExact phrase from supplied copy.",
+		}},
+	}
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<!doctype html><html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>Different copy</main></body></html>"), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles.css"), []byte("body { color: black; }\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile styles: %v", err)
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "required source-copy fragment") || !strings.Contains(joined, "hero.png") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksPythonRuntimeShape(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `class Game:
+    def __init__(self):
+        self.smoke_test = False
+
+    def draw(self):
+        hit_rect = object()
+
+    def handle_input(self):
+        if hit_rect:
+            print("hit")
+
+    def smoke_test(self):
+        print("smoke")
+`
+	if err := os.WriteFile(filepath.Join(root, "blackjack.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile blackjack: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame blackjack",
+		Goal:         "Create a Python game.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"blackjack.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "undefined name hit_rect") || !strings.Contains(joined, "shadows method smoke_test") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationFlagsPythonWildcardImports(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `from config import *
+
+def draw():
+    return SCREEN_WIDTH
+`
+	if err := os.WriteFile(filepath.Join(root, "game.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile game: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame game",
+		Goal:         "Create a Python game.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"game.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "wildcard import from config cannot be statically validated") || !strings.Contains(joined, "replace it with explicit imported names") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksPythonModuleLevelUndefinedAndSmokePath(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import pygame
+
+pygame.init()
+screen = pygame.display.set_mode((800, 600))
+value = random.randint(1, 10)
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame game",
+		Goal:         "Create an interactive Python game.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "module top-level references undefined name random") || !strings.Contains(joined, "has no --smoke path") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationAllowsPygameLeafModuleWithoutSmokePath(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import pygame
+
+class Bird:
+    def draw_once(self, screen):
+        running = True
+        while running:
+            pygame.draw.circle(screen, (255, 200, 0), (10, 10), 5)
+            running = False
+`
+	if err := os.WriteFile(filepath.Join(root, "bird.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile bird: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build bird module",
+		Goal:         "Create a Pygame bird module.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"bird.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	if strings.Contains(strings.Join(messages, "\n"), "has no --smoke path") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksPythonLocalImportExports(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	if err := os.WriteFile(filepath.Join(root, "config.py"), []byte("PIPE_SPAWN_INTERVAL = 1500\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	source := `from config import PIPE_SPAN_INTERVAL
+
+def main():
+    return PIPE_SPAN_INTERVAL
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build Python app",
+		Goal:         "Create an app.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "from config import PIPE_SPAN_INTERVAL references missing local export") || !strings.Contains(joined, "PIPE_SPAWN_INTERVAL") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksPythonSmokeBranch(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import sys
+
+class Game:
+    def play(self):
+        pass
+
+    def render_smoke_frame(self):
+        pass
+
+if __name__ == "__main__":
+    game = Game()
+    if "--smoke" in sys.argv:
+        game.smoke = True
+    game.play()
+    if game.smoke:
+        game.render_smoke_frame()
+`
+	if err := os.WriteFile(filepath.Join(root, "game.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile game: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame game",
+		Goal:         "Create a Python game with --smoke.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"game.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	if !strings.Contains(joined, "does not call a smoke routine") || !strings.Contains(joined, "unconditional interactive loop") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksNestedInteractiveLoop(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `def main():
+    running = True
+    while running:
+        if running:
+            while True:
+                break
+
+if __name__ == "__main__":
+    main()
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame game",
+		Goal:         "Create a Python game.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	if !strings.Contains(strings.Join(messages, "\n"), "nested while True inside another loop") {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksBranchScopedEntryPointVariables(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import pygame
+
+def main():
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+        if event.type == pygame.KEYDOWN:
+            running = False
+        if running:
+            font = pygame.font.Font(None, 32)
+        text = font.render("Game Over", True, (255, 255, 255))
+        if not running:
+            game_over_surface = pygame.Surface((100, 100))
+        game_over_surface.fill((0, 0, 0))
+
+if __name__ == "__main__":
+    main()
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame entrypoint",
+		Goal:         "Create a Python game entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	for _, want := range []string{"loop-scoped local event", "conditional-scoped local font", "conditional-scoped local game_over_surface"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("issues missing %q: %#v", want, issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsPythonClosureHelpers(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `def main():
+    player = object()
+
+    def draw_card():
+        return player
+
+    draw_card()
+
+if __name__ == "__main__":
+    main()
+`
+	if err := os.WriteFile(filepath.Join(root, "game.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile game: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame game",
+		Goal:         "Create a Python game.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"game.py"},
+	}
+	if issues := m.validateArtifactTaskOutput(task); len(issues) != 0 {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestBuildWorkerPacketForArtifactValidationRepairFocus(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<!doctype html><html><head><style>body{}</style></head><body></body></html>"), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles.css"), []byte("body { color: red; }\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile styles: %v", err)
+	}
+	rawPlan := `{"title":"Landing page","summary":"Create artifact","tasks":[{"id":"artifact","title":"Build landing page","goal":"Create a complete cohesive landing page artifact.","allowed_paths":["index.html","styles.css"],"acceptance_checks":[{"description":"index and styles are complete"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	if err := m.store.UpdateTaskStatus("artifact", coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  "artifact",
+		Type:    "artifact_validation",
+		Message: "Artifact validation failed before reviewer handoff.\n- index.html: inline <style> tag",
+	})
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	packet, err := m.buildWorkerPacketForRun(plan.Tasks[0])
+	if err != nil {
+		t.Fatalf("buildWorkerPacketForRun: %v", err)
+	}
+	if !strings.Contains(packet.Goal, "Artifact validation repair focus") || !strings.Contains(packet.Goal, "inline <style>") || strings.Contains(packet.Goal, "before producing a patch") {
+		t.Fatalf("packet goal = %s", packet.Goal)
+	}
+}
+
+func TestBuildWorkerPacketFullFileRepairForBrokenSingleFileArtifact(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("def from fastapi.testclient import TestClient\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile app: %v", err)
+	}
+	rawPlan := `{"title":"API","summary":"Create artifact","tasks":[{"id":"api","title":"Build FastAPI app","goal":"Create a standalone FastAPI SQLite task API in app.py.","allowed_paths":["app.py"],"acceptance_checks":[{"description":"app.py runs with --smoke"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	if err := m.store.UpdateTaskStatus("api", coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  "api",
+		Type:    "artifact_validation",
+		Message: "Artifact validation failed before reviewer handoff.\n- app.py: python compile failed: invalid syntax",
+	})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  "api",
+		Type:    "repair_requested",
+		Message: "Fix invalid syntax and make the smoke path pass.",
+	})
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	packet, err := m.buildWorkerPacketForRun(plan.Tasks[0])
+	if err != nil {
+		t.Fatalf("buildWorkerPacketForRun: %v", err)
+	}
+	for _, want := range []string{"complete replacement content", "leave patch empty", "reconstruct a clean complete file", "ignore the broken current content", "invalid syntax"} {
+		if !strings.Contains(packet.Goal, want) {
+			t.Fatalf("packet goal missing %q:\n%s", want, packet.Goal)
+		}
+	}
+}
+
+func TestBuildWorkerPacketKeepsArtifactValidationAfterReviewerVerdict(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("print('broken'\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile app: %v", err)
+	}
+	rawPlan := `{"title":"App","summary":"Create artifact","tasks":[{"id":"app","title":"Build Python app","goal":"Create a standalone Python app in app.py.","allowed_paths":["app.py"],"acceptance_checks":[{"description":"app.py runs with --smoke"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	if err := m.store.UpdateTaskStatus("app", coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: "app", Type: "artifact_validation", Message: "Artifact validation failed before reviewer handoff.\n- app.py: syntax error at line 1: '(' was never closed"})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: "app", Type: "artifact_validation_escalated", Message: "Repeated local artifact validation failures; escalating current output to frontier reviewer for a focused repair brief."})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: "app", Type: "reviewer_verdict", Message: "needs_fix"})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{TaskID: "app", Type: "repair_requested", Message: "The file is truncated; reconstruct it."})
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	packet, err := m.buildWorkerPacketForRun(plan.Tasks[0])
+	if err != nil {
+		t.Fatalf("buildWorkerPacketForRun: %v", err)
+	}
+	for _, want := range []string{"Latest artifact validation failure", "syntax error at line 1", "ignore the broken current content"} {
+		if !strings.Contains(packet.Goal, want) {
+			t.Fatalf("packet goal missing %q:\n%s", want, packet.Goal)
+		}
+	}
+}
+
+func TestLocalArtifactValidationRepairLimitEscalatesSyntaxImmediately(t *testing.T) {
+	task := coding.Task{ID: "app", Title: "Build app", Goal: "Create app.", AllowedPaths: []string{"app.py"}}
+	issues := []artifactValidationIssue{{Path: "app.py", Message: "syntax error at line 1: '(' was never closed"}}
+	if got := localArtifactValidationRepairLimit(task, issues); got != 1 {
+		t.Fatalf("localArtifactValidationRepairLimit = %d, want 1", got)
+	}
+}
+
+func TestArtifactValidationNormalizesCopyAndCSSAssetRefs(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hero.png"), []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile hero: %v", err)
+	}
+	m.project.Root = root
+	task := coding.Task{
+		ID:           "artifact",
+		PlanID:       "plan",
+		Title:        "Build landing page with image assets",
+		Goal:         "Create a complete static website using image assets.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"index.html", "styles.css"},
+		AcceptanceChecks: []coding.AcceptanceCheck{{
+			Description: sourceCopyContractPrefix + "\nlocal-first terminal apps\nWeazl mascot using a retro terminalUnapologetically local. Terminally weird.",
+		}},
+	}
+	index := `<!doctype html>
+<html><head><link rel="stylesheet" href="styles.css"></head><body>
+<p>local‑first terminal apps</p>
+<img src="weazl_mascot.png" alt="Weazl mascot using a retro terminal">
+<p>Unapologetically local. Terminally weird.</p>
+</body></html>`
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte(index), 0o644); err != nil {
+		t.Fatalf("WriteFile index: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "styles.css"), []byte("body { background: url('hero.png'); }\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile styles: %v", err)
+	}
+	if issues := m.validateArtifactTaskOutput(task); len(issues) != 0 {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestSlashWorkerPatchRejectsPlaceholderRewrite(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<main>real</main>\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Patch HTML","summary":"Apply worker edit","tasks":[{"title":"Update HTML","goal":"Add features section","allowed_paths":["index.html"],"acceptance_checks":[{"description":"features added"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
+	}
+	if !ok {
+		t.Fatal("plan not found")
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Placeholder rewrite",
+		Files: []coding.WorkerFileEdit{{
+			Path:    "index.html",
+			Content: "<!-- Existing content of index.html -->\n<section id=\"features\"></section>\n<!-- Rest of the file content -->\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch rejected" {
+		t.Fatalf("status = %q, want worker patch rejected", got.status)
+	}
+	if !strings.Contains(got.viewport.View(), "placeholder sentinel") {
+		t.Fatalf("viewport missing placeholder rejection: %q", got.viewport.View())
+	}
+	data, err := os.ReadFile(filepath.Join(root, "index.html"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "<main>real</main>\n" {
+		t.Fatalf("index.html changed despite rejection: %q", data)
+	}
+}
+
+func TestSlashWorkerPatchRejectsDiffForSingleFileGeneratedArtifact(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Game","summary":"Create game","tasks":[{"id":"game","title":"Create pygame blackjack","goal":"Build a standalone Python game.","allowed_paths":["blackjack.py"],"acceptance_checks":[{"description":"blackjack.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/approve")
+	if !handled {
+		t.Fatal("approve handled = false")
+	}
+	m = updated.(model)
+	updated, _, handled = m.handleSlashCommand("/run-task")
+	if !handled {
+		t.Fatal("run-task handled = false")
+	}
+	m = updated.(model)
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  "game",
+		Summary: "Diff output",
+		Patch: `diff --git a/blackjack.py b/blackjack.py
+new file mode 100644
+--- /dev/null
++++ b/blackjack.py
+@@ -0,0 +1 @@
++print("game")
+`,
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch rejected" {
+		t.Fatalf("status = %q, want worker patch rejected", got.status)
+	}
+	events, err := got.store.TaskEvents("game")
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	if events[len(events)-1].Type != "worker_rejected" || !strings.Contains(events[len(events)-1].Message, "files[] with complete content") {
+		t.Fatalf("events = %#v", events)
+	}
+	if !retryableWorkerErrorTask(events) {
+		t.Fatalf("single-file artifact diff rejection should be retryable: %#v", events)
 	}
 }
 

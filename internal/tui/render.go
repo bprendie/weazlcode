@@ -317,7 +317,12 @@ func (m model) taskProgressBadge() string {
 	if err != nil || !ok {
 		return ""
 	}
-	return taskProgressBadge(plan)
+	spinnerFrame := ""
+	progress := taskProgressForPlan(plan)
+	if progress.Running > 0 || progress.Reviewing > 0 {
+		spinnerFrame = m.working.View()
+	}
+	return taskProgressBadgeWithSpinner(plan, spinnerFrame)
 }
 
 // helpText returns context-appropriate help text for the current mode

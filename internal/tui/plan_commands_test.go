@@ -46,12 +46,12 @@ func TestGeneratedPlanParsing(t *testing.T) {
 
 func TestGeneratedPlanFiltersNonAllowlistedVerification(t *testing.T) {
 	m := commandTestModel(t)
-	raw := `{"title":"Generated","summary":"From model","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"verification":["grep -q ok README.md","go test ./..."],"acceptance_checks":[{"description":"checks pass"}]}]}`
+	raw := `{"title":"Generated","summary":"From model","tasks":[{"title":"Task","goal":"Do work","allowed_paths":["README.md"],"verification":["grep -q ok README.md","go test ./...","python app.py --smoke"],"acceptance_checks":[{"description":"checks pass"}]}]}`
 	plan, err := m.planFromGeneratedJSON(raw)
 	if err != nil {
 		t.Fatalf("planFromGeneratedJSON: %v", err)
 	}
-	if !reflect.DeepEqual(plan.Tasks[0].Verification, []string{"go test ./..."}) {
+	if !reflect.DeepEqual(plan.Tasks[0].Verification, []string{"go test ./...", "python app.py --smoke"}) {
 		t.Fatalf("verification = %#v", plan.Tasks[0].Verification)
 	}
 }
@@ -161,10 +161,29 @@ func TestPlanGenerateMessagesIncludeProjectContext(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", `"skills"`, "Use small tasks", "go test ./...", "Configured worker:", "small 8.0B-class local worker", "style: small patches", "go-tests", "Write focused Go tests.", "change README"} {
+	for _, want := range []string{"Return only valid JSON", `"skills"`, "Use small tasks", "go test ./...", "Configured worker:", "small 8.0B-class local worker", "Critical efficiency rule", "one whole-file artifact task", "validation-only worker tasks", "fewest tasks", "Modularization north star", "300 lines", "interactive apps, games, APIs", "parallel draft work", "explicit interface contracts", "final wiring/smoke task", "dependency module files", "Dependent code tasks", "surgical cross-module fixes", "explicit imports/interfaces", "not wildcard imports", "non-interactive --smoke path", "python main.py --smoke", "single static landing page", "one cohesive artifact task", "worker output budget", "module-first plans", "sections/*.html", "styles/*.css", "must explicitly say the worker must not include doctype", "plain browser CSS only", "preserve the exact required strings", "Never use ellipses", "Final assembly tasks", "dependency outputs as source material", "Do not create long serial chains", "style: small patches", "go-tests", "Write focused Go tests.", "change README"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("messages missing %q:\n%s", want, combined)
 		}
+	}
+}
+
+func TestAttachSourceCopyContractAddsExactCopyCheck(t *testing.T) {
+	plan := coding.Plan{
+		Tasks: []coding.Task{
+			{ID: "html", Title: "HTML", Goal: "Create page", AllowedPaths: []string{"index.html"}},
+			{ID: "css", Title: "CSS", Goal: "Style page", AllowedPaths: []string{"styles.css"}},
+		},
+	}
+	attachSourceCopyContract(&plan, "Build page.\n\nRequired copy:\nExact product copy that should not be paraphrased.")
+	if len(plan.Tasks[0].AcceptanceChecks) != 1 {
+		t.Fatalf("html checks = %#v", plan.Tasks[0].AcceptanceChecks)
+	}
+	if !strings.Contains(plan.Tasks[0].AcceptanceChecks[0].Description, "Exact product copy") {
+		t.Fatalf("html check = %#v", plan.Tasks[0].AcceptanceChecks[0])
+	}
+	if len(plan.Tasks[1].AcceptanceChecks) != 0 {
+		t.Fatalf("css checks = %#v", plan.Tasks[1].AcceptanceChecks)
 	}
 }
 
@@ -174,7 +193,7 @@ func TestWorkerCapacityProfileInfersModelSize(t *testing.T) {
 	worker.Model = "cyankiwi/granite-4.1-8b-AWQ-INT4"
 	m.cfg.Providers[m.cfg.ModelRoles.Worker] = worker
 	profile := m.workerCapacityProfile()
-	if profile.SizeBillions != 8 || !strings.Contains(profile.Instruction, "tiny") {
+	if profile.SizeBillions != 8 || !strings.Contains(profile.Instruction, "cohesive artifact") {
 		t.Fatalf("profile = %#v", profile)
 	}
 	worker.Model = "unknown-local-model"
@@ -389,6 +408,30 @@ func TestSlashApproveCommand(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != "approval" {
 		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSlashApproveRunDispatchesWorkers(t *testing.T) {
+	m := commandTestModel(t)
+	raw := `{"title":"Approve and run","summary":"Approve plan and start workers","tasks":[{"id":"task-a","title":"A","goal":"Update README.md to mention A.","allowed_paths":["README.md"],"acceptance_checks":[{"description":"README mentions A"}]},{"id":"task-b","title":"B","goal":"Update docs/guide.md to mention B.","allowed_paths":["docs/guide.md"],"acceptance_checks":[{"description":"guide mentions B"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + raw)
+	if !handled {
+		t.Fatal("plan handled = false")
+	}
+	m = updated.(model)
+	if !strings.Contains(m.viewport.View(), "/approve run") {
+		t.Fatalf("plan output missing approve-run hint: %q", m.viewport.View())
+	}
+	updated, cmd, handled := m.handleSlashCommand("/approve run")
+	if !handled {
+		t.Fatal("approve run handled = false")
+	}
+	got := updated.(model)
+	if cmd == nil {
+		t.Fatal("cmd = nil, want worker batch")
+	}
+	if got.status != "running 2 worker(s)" || len(got.workerRuns) != 2 {
+		t.Fatalf("status/runs = %q/%#v", got.status, got.workerRuns)
 	}
 }
 

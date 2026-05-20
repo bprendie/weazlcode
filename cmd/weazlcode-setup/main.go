@@ -149,6 +149,9 @@ func writeConfig(cfgPath string, cfg config.Config, providerType, serverURL, mod
 	}
 	cfg.ModelRoles.Worker = providerID
 	cfg.ModelRoles.Summarizer = providerID
+	if cfg.Workers.Concurrency <= config.RecommendedWorkerConcurrency("ollama") {
+		cfg.Workers.Concurrency = config.RecommendedWorkerConcurrency(providerType)
+	}
 	if cfg.ModelRoles.Orchestrator == "" || cfg.ModelRoles.Orchestrator == previousActive {
 		cfg.ModelRoles.Orchestrator = providerID
 	}
@@ -161,6 +164,7 @@ func writeConfig(cfgPath string, cfg config.Config, providerType, serverURL, mod
 	fmt.Printf("Wrote config: %s\n", cfgPath)
 	fmt.Printf("Active provider: %s (%s / %s)\n", providerID, providerType, model)
 	fmt.Printf("Roles: orchestrator=%s worker=%s reviewer=%s summarizer=%s\n", cfg.ModelRoles.Orchestrator, cfg.ModelRoles.Worker, cfg.ModelRoles.Reviewer, cfg.ModelRoles.Summarizer)
+	fmt.Printf("Worker concurrency: %d\n", cfg.Workers.Concurrency)
 	if cfg.Tools.Enabled {
 		fmt.Println("Tools enabled")
 	}

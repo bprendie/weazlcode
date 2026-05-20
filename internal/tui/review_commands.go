@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,7 +17,8 @@ import (
 	"github.com/bprendie/weazlcode/internal/project"
 )
 
-const maxRepairAttempts = 2
+const maxRepairAttempts = 4
+const maxArtifactRepairAttempts = 4
 
 func (m model) reviewerInputCommandText() string {
 	input, err := m.buildReviewerInput()
@@ -193,7 +196,13 @@ func reviewerVerdictMessages(input coding.ReviewerInput) []llm.ChatMessage {
 				"Use this exact shape: {\"verdict\":\"approve|needs_fix|blocked\",\"summary\":\"...\",\"issues\":[\"...\"]}.",
 				"Approve only when the diff satisfies the task packet, allowed paths, verification output, and acceptance checks.",
 				"Mechanically compare the task goal, allowed paths, diff paths, verification output, and each acceptance check before approving.",
+				"When reviewing generated content, reject paraphrased, shortened, ellipsis-filled, or invented copy where the task packet or context provides exact copy, filenames, commands, or URLs.",
+				"For assembly tasks, compare the assembled output against dependency context_files and reject missing sections, shortened text, wrong asset paths, wrong links, or inline styles that should live in CSS.",
+				"For CSS, 'nested selectors' means preprocessor-style selector blocks nested inside another rule. Normal descendant selectors, pseudo-classes, and pseudo-elements are valid plain browser CSS unless the task explicitly forbids them.",
+				"For interactive graphical programs, reject implementations that open a blank/black initial window or wait for input before rendering the first visible frame required by the task.",
 				"If the diff is empty, unrelated, outside allowed paths, missing expected verification, or only plausibly related, use needs_fix with concrete issues.",
+				"If task_events_summary includes a local artifact validation failure, make the needs_fix response focus on those exact deterministic validation messages first. Do not add speculative secondary issues until local validation passes.",
+				"For needs_fix, return a surgical repair brief: at most three highest-priority issues, each naming the file/symbol/branch to edit and the smallest viable change. Avoid broad rewrite requests.",
 				"Use needs_fix for focused repairable issues. Use blocked only for missing context or user decisions.",
 			}, "\n"),
 		},
@@ -265,8 +274,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 				Verdict coding.ReviewVerdict `json:"verdict"`
 			}{TaskID: task.ID, Verdict: guardrail})
 			m.addSystemNote("Reviewer approval blocked by local guardrails:\n" + renderJSON(guardrail))
-			m.status = "review guardrail"
-			return m, nil, true
+			verdict = guardrail
 		}
 	}
 	payload, _ := json.Marshal(verdict)
@@ -308,22 +316,18 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 			m.status = "review failed"
 			return m, nil, true
 		}
+		repairLimit := repairAttemptLimit(task, events)
 		attempt := repairAttemptCount(events) + 1
-		if err := m.restoreTaskBaseline(task, events, "review needs fix"); err != nil {
-			m.addSystemNote("Review cleanup error: " + err.Error())
-			m.status = "review cleanup failed"
-			return m, nil, true
-		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
 			m.status = "review failed"
 			return m, nil, true
 		}
-		if attempt > maxRepairAttempts {
+		if attempt > repairLimit {
 			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 				TaskID:  task.ID,
 				Type:    "repair_limit",
-				Message: fmt.Sprintf("Repair limit reached after %d attempts.", maxRepairAttempts),
+				Message: fmt.Sprintf("Repair limit reached after %d attempts.", repairLimit),
 			})
 			m.addSystemNote("Reviewer requested fixes, but the repair limit has been reached:\n" + renderJSON(verdict))
 			m.status = "repair limit reached"
@@ -341,7 +345,7 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 			TaskID:  task.ID,
 			Type:    "repair_requested",
-			Message: repairRequestText(verdict, attempt),
+			Message: repairRequestText(verdict, attempt, repairLimit),
 			Payload: repairPayload,
 		})
 		m.writeRunArtifact("repair_request", struct {
@@ -353,12 +357,6 @@ func (m model) applyReviewVerdict(verdict coding.ReviewVerdict, telemetry *model
 		m.addSystemNote("Reviewer requested focused repair:\n" + renderJSON(verdict))
 		m.status = "repair requested"
 	case coding.ReviewBlocked:
-		events, _ := m.store.TaskEvents(task.ID)
-		if err := m.restoreTaskBaseline(task, events, "review blocked"); err != nil {
-			m.addSystemNote("Review cleanup error: " + err.Error())
-			m.status = "review cleanup failed"
-			return m, nil, true
-		}
 		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
 			m.addSystemNote("Review error: " + err.Error())
 			m.status = "review failed"
@@ -391,6 +389,10 @@ func (m model) reviewApprovalIssues(task coding.Task) []string {
 	if len(task.AcceptanceChecks) == 0 {
 		issues = append(issues, "task has no acceptance checks to review")
 	}
+	issues = append(issues, m.requiredSourceCopyIssues(task)...)
+	if validation, ok := latestArtifactValidation(events); ok {
+		issues = append(issues, "local artifact validation is still failing:\n"+validation)
+	}
 	verification := m.taskVerification(task)
 	if len(verification) > 0 {
 		if latestVerificationFailed(events) {
@@ -400,6 +402,231 @@ func (m model) reviewApprovalIssues(task coding.Task) []string {
 		}
 	}
 	return issues
+}
+
+func (m model) requiredSourceCopyIssues(task coding.Task) []string {
+	copyBlock := requiredSourceCopyBlock(task)
+	if copyBlock == "" {
+		return nil
+	}
+	output := m.copyBearingTaskOutput(task)
+	if strings.TrimSpace(output) == "" {
+		return []string{"required source copy check could not read any generated text output"}
+	}
+	normalizedOutput := normalizeCopyForContainment(output)
+	fragments := requiredCopyFragments(copyBlock)
+	var missing []string
+	for _, fragment := range fragments {
+		if !strings.Contains(normalizedOutput, normalizeCopyForContainment(fragment)) && !copyContainsFragment(output, fragment) {
+			missing = append(missing, fragment)
+			if len(missing) >= 8 {
+				break
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	issues := []string{"generated output is missing required source-copy fragments:"}
+	for _, fragment := range missing {
+		issues = append(issues, "- "+fragment)
+	}
+	return issues
+}
+
+func requiredSourceCopyBlock(task coding.Task) string {
+	for _, check := range task.AcceptanceChecks {
+		description := strings.TrimSpace(check.Description)
+		if strings.HasPrefix(description, sourceCopyContractPrefix) {
+			return strings.TrimSpace(strings.TrimPrefix(description, sourceCopyContractPrefix))
+		}
+	}
+	return ""
+}
+
+func (m model) copyBearingTaskOutput(task coding.Task) string {
+	var b strings.Builder
+	for _, rawPath := range task.AllowedPaths {
+		path := strings.TrimSpace(filepath.ToSlash(rawPath))
+		if !copyBearingPath(path) {
+			continue
+		}
+		fullPath := filepath.Join(m.project.Root, filepath.FromSlash(path))
+		data, err := os.ReadFile(fullPath)
+		if err != nil {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteString("\n")
+		}
+		b.Write(data)
+	}
+	return b.String()
+}
+
+func copyBearingPath(path string) bool {
+	lower := strings.ToLower(strings.TrimSpace(path))
+	switch {
+	case strings.HasSuffix(lower, ".html"),
+		strings.HasSuffix(lower, ".htm"),
+		strings.HasSuffix(lower, ".css"),
+		strings.HasSuffix(lower, ".md"),
+		strings.HasSuffix(lower, ".txt"),
+		strings.HasSuffix(lower, ".json"),
+		strings.HasSuffix(lower, ".yaml"),
+		strings.HasSuffix(lower, ".yml"):
+		return true
+	default:
+		return false
+	}
+}
+
+func requiredCopyFragments(copyBlock string) []string {
+	fields := strings.FieldsFunc(copyBlock, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	var fragments []string
+	seen := map[string]bool{}
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, "/")
+		value = strings.TrimSpace(value)
+		if len(value) < 20 {
+			return
+		}
+		if len(value) > 260 {
+			return
+		}
+		key := normalizeCopyForContainment(value)
+		if key == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		fragments = append(fragments, value)
+	}
+	for _, field := range fields {
+		line := strings.TrimSpace(field)
+		if strings.Contains(line, " / ") {
+			for _, part := range strings.Split(line, " / ") {
+				add(part)
+			}
+			continue
+		}
+		add(line)
+	}
+	if len(fragments) > 48 {
+		fragments = fragments[:48]
+	}
+	return fragments
+}
+
+func normalizeCopyForContainment(value string) string {
+	value = strings.NewReplacer(
+		"\u2010", "-",
+		"\u2011", "-",
+		"\u2012", "-",
+		"\u2013", "-",
+		"\u2014", "-",
+		"\u2212", "-",
+		"\u00a0", " ",
+		"\u2018", "'",
+		"\u2019", "'",
+		"\u201c", "\"",
+		"\u201d", "\"",
+	).Replace(value)
+	value = stripMarkupForCopyComparison(value)
+	return strings.Join(strings.Fields(value), " ")
+}
+
+func compactCopyForContainment(value string) string {
+	normalized := strings.ToLower(normalizeCopyForContainment(value))
+	var b strings.Builder
+	for _, r := range normalized {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func copyContainsFragment(output, fragment string) bool {
+	normalizedOutput := normalizeCopyForContainment(output)
+	normalizedFragment := normalizeCopyForContainment(fragment)
+	if strings.Contains(normalizedOutput, normalizedFragment) {
+		return true
+	}
+	compactOutput := compactCopyForContainment(output)
+	compactFragment := compactCopyForContainment(fragment)
+	if compactFragment != "" && strings.Contains(compactOutput, compactFragment) {
+		return true
+	}
+	rawCompactOutput := compactRawCopyForContainment(output)
+	rawCompactFragment := compactRawCopyForContainment(fragment)
+	return rawCompactFragment != "" && strings.Contains(rawCompactOutput, rawCompactFragment)
+}
+
+func compactRawCopyForContainment(value string) string {
+	value = strings.NewReplacer(
+		"\u2010", "-",
+		"\u2011", "-",
+		"\u2012", "-",
+		"\u2013", "-",
+		"\u2014", "-",
+		"\u2212", "-",
+		"\u00a0", " ",
+		"\u2018", "'",
+		"\u2019", "'",
+		"\u201c", "\"",
+		"\u201d", "\"",
+	).Replace(value)
+	value = strings.ToLower(value)
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func stripMarkupForCopyComparison(value string) string {
+	var b strings.Builder
+	inTag := false
+	var quote rune
+	for _, r := range value {
+		switch r {
+		case '<':
+			inTag = true
+			quote = 0
+			b.WriteRune(' ')
+		case '>':
+			if quote == 0 {
+				inTag = false
+				b.WriteRune(' ')
+			} else {
+				b.WriteRune(r)
+			}
+		case '\'', '"':
+			if inTag {
+				if quote == 0 {
+					quote = r
+					b.WriteRune(' ')
+				} else if quote == r {
+					quote = 0
+					b.WriteRune(' ')
+				} else {
+					b.WriteRune(r)
+				}
+				continue
+			}
+			b.WriteRune(r)
+		default:
+			if !inTag || quote != 0 {
+				b.WriteRune(r)
+			}
+		}
+	}
+	return b.String()
 }
 
 func latestVerificationPassed(events []coding.TaskEvent) bool {
@@ -524,9 +751,9 @@ func reviewVerdictFromEvent(event coding.TaskEvent) (coding.ReviewVerdict, bool)
 	return verdict, true
 }
 
-func repairRequestText(verdict coding.ReviewVerdict, attempt int) string {
+func repairRequestText(verdict coding.ReviewVerdict, attempt, limit int) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Repair attempt %d/%d: %s", attempt, maxRepairAttempts, emptyFallback(verdict.Summary, "Address reviewer issues."))
+	fmt.Fprintf(&b, "Repair attempt %d/%d: %s", attempt, limit, emptyFallback(verdict.Summary, "Address reviewer issues."))
 	for _, issue := range verdict.Issues {
 		if strings.TrimSpace(issue) != "" {
 			fmt.Fprintf(&b, "\n- %s", strings.TrimSpace(issue))

@@ -1,9 +1,12 @@
 package project
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -35,7 +38,7 @@ func Detect(cwd string) (Summary, error) {
 	if root == "" {
 		root = abs
 	}
-	stateDir := filepath.Join(root, ".weazlcode")
+	stateDir := stateDirForRoot(root)
 	logDir := filepath.Join(stateDir, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		return Summary{}, err
@@ -53,6 +56,50 @@ func Detect(cwd string) (Summary, error) {
 	s.IgnoreFile = ignoreFile(root)
 	s.Languages, s.FileCount = scanProject(root, loadIgnoreRules(s.IgnoreFile))
 	return s, nil
+}
+
+func stateDirForRoot(root string) string {
+	if runtime.GOOS != "windows" {
+		return filepath.Join(root, ".weazlcode")
+	}
+	base := strings.TrimSpace(filepath.Base(root))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		base = "project"
+	}
+	base = safeStateDirName(base)
+	sum := sha1.Sum([]byte(root))
+	return filepath.Join(windowsAppDataRoot(), "projects", base+"-"+hex.EncodeToString(sum[:])[:10])
+}
+
+func safeStateDirName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-_")
+	if out == "" {
+		return "project"
+	}
+	return out
+}
+
+func windowsAppDataRoot() string {
+	if p := os.Getenv("WEAZLCODE_HOME"); p != "" {
+		return p
+	}
+	if p := os.Getenv("APPDATA"); p != "" {
+		return filepath.Join(p, "weazlcode")
+	}
+	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
+		return filepath.Join(dir, "weazlcode")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "AppData", "Roaming", "weazlcode")
 }
 
 func gitRoot(cwd string) (string, bool) {

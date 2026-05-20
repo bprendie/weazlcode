@@ -38,55 +38,57 @@ const (
 )
 
 type model struct {
-	cfg                 config.Config
-	cfgPath             string
-	project             project.Summary
-	store               *storage.Store
-	toolRegistry        *tools.Registry
-	styles              styles
-	mode                mode
-	width               int
-	height              int
-	input               textinput.Model
-	viewport            viewport.Model
-	markdown            markdownRenderer
-	sessions            list.Model
-	workspaces          list.Model
-	working             spinner.Model
-	contextBar          progress.Model
-	activeWorkspaceID   int64
-	activeWorkspaceName string
-	activeWorkspaceAt   time.Time
-	renameWorkspaceID   int64
-	renameReturnMode    mode
-	renameDraft         string
-	session             storage.Session
-	messages            []storage.Message
-	checkpoint          storage.ContextCheckpoint
-	hasCheckpoint       bool
-	err                 string
-	status              string
-	thinking            bool
-	trimming            bool
-	mouseScroll         bool
-	stream              <-chan streamEvent
-	streamText          string
-	streamAt            time.Time
-	reqIn               int
-	reqOut              int
-	pasteText           string
-	pasteLines          int
-	historyIdx          int
-	historyDraft        string
-	pendingTools        []llm.ToolCall
-	toolResults         []string
-	pendingToolInput    int
-	pendingToolOutput   int
-	modelRunID          int
-	activeModelRunID    int
-	cancelModel         context.CancelFunc
-	workerRuns          map[int]string
-	cancelWorkerRuns    map[int]context.CancelFunc
+	cfg                  config.Config
+	cfgPath              string
+	project              project.Summary
+	store                *storage.Store
+	toolRegistry         *tools.Registry
+	styles               styles
+	mode                 mode
+	width                int
+	height               int
+	input                textinput.Model
+	viewport             viewport.Model
+	markdown             markdownRenderer
+	sessions             list.Model
+	workspaces           list.Model
+	working              spinner.Model
+	contextBar           progress.Model
+	activeWorkspaceID    int64
+	activeWorkspaceName  string
+	activeWorkspaceAt    time.Time
+	renameWorkspaceID    int64
+	renameReturnMode     mode
+	renameDraft          string
+	session              storage.Session
+	messages             []storage.Message
+	checkpoint           storage.ContextCheckpoint
+	hasCheckpoint        bool
+	err                  string
+	status               string
+	thinking             bool
+	trimming             bool
+	mouseScroll          bool
+	stream               <-chan streamEvent
+	streamText           string
+	streamAt             time.Time
+	reqIn                int
+	reqOut               int
+	pasteText            string
+	pasteLines           int
+	historyIdx           int
+	historyDraft         string
+	pendingTools         []llm.ToolCall
+	toolResults          []string
+	pendingToolInput     int
+	pendingToolOutput    int
+	modelRunID           int
+	activeModelRunID     int
+	cancelModel          context.CancelFunc
+	workerRuns           map[int]string
+	cancelWorkerRuns     map[int]context.CancelFunc
+	autonomousRun        bool
+	autonomousRunStarted time.Time
 }
 
 type streamEvent struct {
@@ -436,9 +438,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.addSystemNote(note + ": " + msg.err.Error())
 			m.status = status
+			if m.autonomousRun {
+				return m.continueAutonomousRun(nil)
+			}
 			return m, nil
 		}
 		next, cmd, _ := m.applyWorkerPatchWithTelemetry(msg.patch, true, &msg.telemetry)
+		if updated, ok := next.(model); ok && updated.autonomousRun {
+			return updated.continueAutonomousRun(cmd)
+		}
 		return next, cmd
 	case reviewerRunMsg:
 		if msg.runID != m.activeModelRunID {
@@ -451,9 +459,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.recordReviewerModelError(msg.err, &msg.telemetry)
 			m.addSystemNote("Reviewer model error: " + msg.err.Error())
 			m.status = "reviewer run failed"
+			if m.autonomousRun {
+				return m.continueAutonomousRun(nil)
+			}
 			return m, nil
 		}
 		next, cmd, _ := m.applyReviewVerdict(msg.verdict, &msg.telemetry)
+		if updated, ok := next.(model); ok && updated.autonomousRun {
+			return updated.continueAutonomousRun(cmd)
+		}
 		return next, cmd
 	case previousSessionMsg:
 		m.thinking = false

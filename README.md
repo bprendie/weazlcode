@@ -12,7 +12,7 @@ WeazlCode is a sovereign, local-first AI coding TUI that splits the brain to sav
 
 WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architecture are implemented, smoke-tested, and live:
 
-- Project-Aware Metal: Git root detection, local `.weazlcode/` state, project summaries, and isolated tool logs.
+- Project-Aware Metal: Git root detection, local `.weazlcode/` state on Unix-style systems, AppData-backed project state on Windows, project summaries, and isolated tool logs.
 - The Grindage Loop: Bounded task packets, structured `WorkerPatch` output, unified diffs, path validation, and capped repair loops.
 - Split Roles: Orchestrator, worker, reviewer, and summarizer roles with runtime-configured providers.
 - Hardened Execution: Separate read-only vs. verification command execution. Bounded-path guardrails keep the worker from wandering outside the sandbox.
@@ -22,14 +22,17 @@ WeazlCode has moved beyond simple chat. Phase 1 through 6 of the IDE architectur
 - Parallel Workers: `workers.concurrency`, task `depends_on`, `/run-workers`, non-overlapping path scheduling, per-task worker cancellation, and configurable worker request timeouts.
 - Review Loops: Claude/OpenAI-class reviewers can inspect task-scoped evidence, request focused repairs, and send only bounded repair packets back to the local worker.
 - Replan And Cleanup: Rejected or blocked worker outputs are restored to their task baselines, and `/plan replan` can turn completed work, blocked evidence, and remaining tasks into a fresh draft plan.
-- Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under `.weazlcode/logs/hooks.jsonl`.
+- Hooks: Optional `before_tool`, `after_tool`, and `task_done` commands receive structured JSON on stdin and log results under project-local state logs.
 - Notifications: Optional terminal-bell notifications for task completion, blocked tasks, worker blockers, and repair requests.
 - External Editor: `/edit <path> [line]` opens project files through a configured editor command while keeping paths scoped to the project root.
 - Debug Adapter Foundation: `/debug` inspects configured adapters, and `/debug launch <name>` runs a bounded DAP launch handshake with logs in `/outputs`.
 
 ## Defaults
 
-On first launch, WeazlCode drops a fresh `config.json` into `~/.config/weazlcode/` with sensible local defaults:
+On first launch, WeazlCode drops a fresh `config.json` with sensible local defaults:
+
+- Linux/macOS: `~/.config/weazlcode/config.json`
+- Windows: `%APPDATA%\weazlcode\config\config.json`
 
 - `local-vllm`: `http://localhost:8000`
 - model: `local-model`
@@ -47,13 +50,26 @@ WeazlCode also infers a worker capacity profile from the configured worker model
 go run ./cmd/weazlcode
 ```
 
-## Install Script
+## Install Scripts
 
 ```sh
 ./scripts/install.sh
 ```
 
-No wizards. No corporate installers. The script handles the chores: it builds `weazlcode`, tucks it into `~/.weazlcode/bin`, and adds that directory to your shell `PATH`.
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+No wizards. No corporate installers. The Unix script handles the chores: it builds `weazlcode`, tucks it into `~/.weazlcode/bin`, and adds that directory to your shell `PATH`.
+
+The Windows PowerShell installer is first-class too. It installs missing build dependencies with `winget` where possible, including Go, Git, and MSYS2/UCRT64 GCC for CGO, builds `weazlcode.exe`, installs it into `%APPDATA%\weazlcode\bin`, and adds that directory to your user `PATH`.
+
+Windows uses normal AppData folders instead of Unix dot directories:
+
+- binary: `%APPDATA%\weazlcode\bin\weazlcode.exe`
+- config: `%APPDATA%\weazlcode\config\config.json`
+- vault/database: `%APPDATA%\weazlcode\vaults\weazlcode.sqlite3`
+- cache: `%APPDATA%\weazlcode\cache`
 
 During setup, you configure the local worker first, usually Ollama or vLLM. The script queries the provider for available models, then asks for an optional heavyweight LLM provider for planning and review. If you choose `none`, WeazlCode falls back to your local model for planning and will warn you that the orchestration might be a bit raw.
 
@@ -78,12 +94,18 @@ xcode-select --install
 go build -o weazlcode ./cmd/weazlcode
 ```
 
-### Windows With MSYS2
+### Windows
 
-Install Go for Windows, then use MSYS2 to install a C compiler.
+Use the PowerShell installer when you want the whole path handled:
 
-```sh
-pacman -S --needed mingw-w64-ucrt-x86_64-gcc
+```powershell
+PowerShell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+```
+
+Manual builds need Go for Windows plus MSYS2 UCRT64 GCC:
+
+```powershell
+C:\msys64\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc"
 ```
 
 Then build:
@@ -136,7 +158,10 @@ Tool calls stay neatly tucked away as `using tools` in the transcript. WeazlCode
 
 WeazlCode is not a static chat window. It supports native function calling to interact with your local workspace. Important: you need a model with native tool support, such as Llama 3.1 or Mistral-Nemo, for the fun stuff.
 
-Configure tools in `~/.config/weazlcode/config.json`:
+Configure tools in your local config file:
+
+- Linux/macOS: `~/.config/weazlcode/config.json`
+- Windows: `%APPDATA%\weazlcode\config\config.json`
 
 - Workspace Tools: Operates strictly under configured `workspace_roots`. Includes `read_file`, `git_diff`, `apply_patch`, and local SQLite querying.
 - Execution Tools: `run_readonly_command` executes a tight allowlist of inspection commands like `rg`, `cat`, and `ls`. `run_verification_command` runs approved linters/tests and requires explicit prompt-level approval.
@@ -144,7 +169,7 @@ Configure tools in `~/.config/weazlcode/config.json`:
 
 ## Hooks
 
-Hooks are disabled by default. When enabled, each configured command receives a JSON event payload on stdin and runs from the project root with a short timeout. Configure them in `~/.config/weazlcode/config.json`:
+Hooks are disabled by default. When enabled, each configured command receives a JSON event payload on stdin and runs from the project root with a short timeout. Configure them in your WeazlCode config file:
 
 ```json
 {
@@ -222,7 +247,7 @@ Debugger support is intentionally a foundation right now, not a full interactive
 }
 ```
 
-The command runs locally, sends a DAP-framed launch request on stdin, captures output, enforces project-root path validation for `program` and `cwd`, and records results in `.weazlcode/logs/debug.jsonl`.
+The command runs locally, sends a DAP-framed launch request on stdin, captures output, enforces project-root path validation for `program` and `cwd`, and records results in the project state logs.
 
 ## Security
 

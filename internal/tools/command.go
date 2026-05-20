@@ -87,10 +87,11 @@ func (t *RunCommandTool) Execute(ctx context.Context, params map[string]any) (st
 	if err != nil {
 		return "", err
 	}
+	execName, execArgs := t.resolveExecutable(cwd, name, args)
 
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, execName, execArgs...)
 	cmd.Dir = cwd
 	out, err := cmd.CombinedOutput()
 	text := string(out)
@@ -98,6 +99,41 @@ func (t *RunCommandTool) Execute(ctx context.Context, params map[string]any) (st
 		text += "\n" + err.Error()
 	}
 	return t.limits.Truncate(fmt.Sprintf("$ %s %s\n%s", name, strings.Join(args, " "), text)), nil
+}
+
+func (t *RunCommandTool) resolveExecutable(cwd, name string, args []string) (string, []string) {
+	if t.mode != commandModeVerification {
+		return name, args
+	}
+	pythonBin := strings.TrimSpace(t.limits.PythonBin)
+	if pythonBin == "" {
+		pythonBin = discoverWorkspacePython(cwd)
+	}
+	if pythonBin == "" {
+		return name, args
+	}
+	switch filepath.Base(name) {
+	case "python", "python3":
+		return pythonBin, args
+	case "pytest":
+		return pythonBin, append([]string{"-m", "pytest"}, args...)
+	default:
+		return name, args
+	}
+}
+
+func discoverWorkspacePython(cwd string) string {
+	for {
+		candidate := filepath.Join(cwd, ".venv", "bin", "python")
+		if info, err := exec.LookPath(candidate); err == nil && info != "" {
+			return info
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			return ""
+		}
+		cwd = parent
+	}
 }
 
 func stringSliceParam(v any) ([]string, error) {
@@ -173,7 +209,10 @@ func validateVerificationCommand(base string, args []string) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("only python -m pytest|unittest|compileall is allowlisted")
+		if len(args) == 2 && strings.HasSuffix(args[0], ".py") && args[1] == "--smoke" && filepath.Base(args[0]) == args[0] {
+			return nil
+		}
+		return fmt.Errorf("only python -m pytest|unittest|compileall or python script.py --smoke is allowlisted")
 	case "pytest":
 		return nil
 	case "cargo":

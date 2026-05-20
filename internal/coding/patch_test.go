@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -154,5 +155,37 @@ func TestDetectSuspiciousFileRewrites(t *testing.T) {
 	rewrites = DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{Path: "large.md", Content: oldContent + "new line\n"}})
 	if len(rewrites) != 0 {
 		t.Fatalf("rewrites = %#v, want none for additive edit", rewrites)
+	}
+}
+
+func TestDetectSuspiciousFileRewritesRejectsPlaceholders(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.html"), []byte("<main>real content</main>\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	rewrites := DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{
+		Path: "index.html",
+		Content: `<!-- Existing content of index.html -->
+<section id="features"></section>
+<!-- Rest of the file content -->`,
+	}})
+	if len(rewrites) != 1 || !strings.Contains(rewrites[0].Reason, "placeholder sentinel") {
+		t.Fatalf("rewrites = %#v, want placeholder rejection", rewrites)
+	}
+
+	rewrites = DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{
+		Path:    "new.css",
+		Content: "/* Existing styles omitted for brevity */\n.feature-grid { display: grid; }\n",
+	}})
+	if len(rewrites) != 1 || rewrites[0].Path != "new.css" {
+		t.Fatalf("rewrites = %#v, want new.css placeholder rejection", rewrites)
+	}
+
+	rewrites = DetectSuspiciousFileRewrites(root, []WorkerFileEdit{{
+		Path:    "component.html",
+		Content: "<article>\n+</article>\n",
+	}})
+	if len(rewrites) != 1 || !strings.Contains(rewrites[0].Reason, "diff marker residue") {
+		t.Fatalf("rewrites = %#v, want diff marker residue rejection", rewrites)
 	}
 }

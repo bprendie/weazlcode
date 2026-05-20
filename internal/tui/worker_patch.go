@@ -12,7 +12,11 @@ import (
 	"github.com/bprendie/weazlcode/internal/llm"
 )
 
-const maxWorkerPatchDiffRepairAttempts = 2
+const (
+	maxWorkerPatchDiffRepairAttempts       = 2
+	maxLocalArtifactValidationRepairPasses = 2
+	maxDeterministicArtifactRepairPasses   = 4
+)
 
 func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
 	if raw == "" {
@@ -69,7 +73,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Payload: payload,
 		})
 	}
-	if strings.TrimSpace(patch.Blocker) != "" {
+	if blocker := workerBlockerText(patch.Blocker); blocker != "" {
 		events, _ := m.store.TaskEvents(task.ID)
 		if err := m.restoreTaskBaseline(task, events, "worker blocker"); err != nil {
 			m.addSystemNote("Worker cleanup error: " + err.Error())
@@ -85,12 +89,12 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
 			TaskID:  task.ID,
 			Type:    "worker_blocker",
-			Message: patch.Blocker,
+			Message: blocker,
 			Payload: payload,
 		})
-		m.addSystemNote(fmt.Sprintf("Worker reported blocker for %s:\n%s", task.Title, patch.Blocker))
+		m.addSystemNote(fmt.Sprintf("Worker reported blocker for %s:\n%s", task.Title, blocker))
 		m.status = "worker reported blocker"
-		return m, m.notificationCmd("worker_blocker", task.Title, patch.Blocker), true
+		return m, m.notificationCmd("worker_blocker", task.Title, blocker), true
 	}
 	paths := coding.PatchPaths(patch.Patch)
 	if len(patch.Files) > 0 {
@@ -116,6 +120,11 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Message: message,
 			Payload: payload,
 		})
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
 		m.writeRunArtifact("worker_rejected", struct {
 			TaskID        string   `json:"task_id"`
 			Paths         []string `json:"paths"`
@@ -127,7 +136,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		m.status = "worker patch rejected"
 		return m, nil, true
 	}
-	if rewrites := coding.DetectSuspiciousFileRewrites(m.project.Root, patch.Files); len(rewrites) > 0 {
+	if rewrites := m.suspiciousWorkerRewrites(task, patch.Files); len(rewrites) > 0 {
 		message := formatSuspiciousRewriteRejection(rewrites)
 		payload, _ := json.Marshal(rewrites)
 		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
@@ -136,6 +145,11 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Message: message,
 			Payload: payload,
 		})
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
 		m.writeRunArtifact("worker_rejected", struct {
 			TaskID   string                     `json:"task_id"`
 			Rewrites []coding.SuspiciousRewrite `json:"rewrites"`
@@ -144,11 +158,42 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		m.status = "worker patch rejected"
 		return m, nil, true
 	}
+	if singleFileGeneratedArtifactTask(task) && len(patch.Files) == 0 {
+		message := "Worker patch rejected: single-file generated artifact tasks must return files[] with complete content for the allowed file and an empty patch field."
+		payload, _ := json.Marshal(struct {
+			AllowedPaths []string `json:"allowed_paths"`
+			PatchChars   int      `json:"patch_chars"`
+		}{AllowedPaths: task.AllowedPaths, PatchChars: len(patch.Patch)})
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_rejected",
+			Message: message,
+			Payload: payload,
+		})
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
+		m.writeRunArtifact("worker_rejected", struct {
+			TaskID       string   `json:"task_id"`
+			AllowedPaths []string `json:"allowed_paths"`
+			PatchChars   int      `json:"patch_chars"`
+		}{TaskID: task.ID, AllowedPaths: task.AllowedPaths, PatchChars: len(patch.Patch)})
+		m.addSystemNote(message)
+		m.status = "worker patch rejected"
+		return m, nil, true
+	}
 	result, err := applyWorkerPatchContent(m.project.Root, patch)
 	if err != nil {
 		applyErrors = append(applyErrors, err)
 		if len(patch.Files) == 0 && repairInvalidDiff && repairAttempts < maxWorkerPatchDiffRepairAttempts {
-			ctx, cancel := context.WithTimeout(context.Background(), m.workerRequestTimeout())
+			timeout := m.boundedWorkerRepairTimeout()
+			if timeout <= 0 {
+				message := formatWorkerPatchApplyFailure(applyErrors, fmt.Errorf("run SLA expired before patch repair"))
+				return m.blockTaskAfterWorkerApplyFailure(task, message)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			repaired, repairErr := m.repairWorkerPatchDiff(ctx, task, patch, err)
 			if repairErr == nil {
@@ -159,6 +204,44 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		}
 		message := formatWorkerPatchApplyFailure(applyErrors, nil)
 		return m.blockTaskAfterWorkerApplyFailure(task, message)
+	}
+	if issues := m.validateArtifactTaskOutput(task); len(issues) > 0 {
+		events, _ := m.store.TaskEvents(task.ID)
+		message := formatArtifactValidationIssues(issues)
+		payload, _ := json.Marshal(artifactValidationPayload(issues))
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "artifact_validation",
+			Message: message,
+			Payload: payload,
+		})
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
+		m.writeRunArtifact("artifact_validation", struct {
+			TaskID string                    `json:"task_id"`
+			Issues []artifactValidationIssue `json:"issues"`
+		}{TaskID: task.ID, Issues: issues})
+		if artifactValidationFailureCount(events)+1 >= localArtifactValidationRepairLimit(task, issues) {
+			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+				TaskID:  task.ID,
+				Type:    "artifact_validation_escalated",
+				Message: "Repeated local artifact validation failures; escalating current output to frontier reviewer for a focused repair brief.",
+			})
+			if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusReviewing); err != nil {
+				m.addSystemNote("Worker patch error: " + err.Error())
+				m.status = "worker patch failed"
+				return m, nil, true
+			}
+			m.addSystemNote(message + "\n\nRepeated local validation failures; escalating to reviewer for focused repair guidance.")
+			m.status = "artifact validation escalated"
+			return m, nil, true
+		}
+		m.addSystemNote(message)
+		m.status = "artifact validation failed"
+		return m, nil, true
 	}
 	if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusReviewing); err != nil {
 		m.addSystemNote("Worker patch error: " + err.Error())
@@ -237,6 +320,78 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 	return m, nil, true
 }
 
+func localArtifactValidationRepairLimit(task coding.Task, issues []artifactValidationIssue) int {
+	if singleFileGeneratedArtifactTask(task) && syntaxArtifactValidationIssues(issues) {
+		return 1
+	}
+	if generatedCodeArtifactTask(task) && deterministicArtifactValidationIssues(issues) {
+		return maxDeterministicArtifactRepairPasses
+	}
+	return maxLocalArtifactValidationRepairPasses
+}
+
+func syntaxArtifactValidationIssues(issues []artifactValidationIssue) bool {
+	if len(issues) == 0 {
+		return false
+	}
+	for _, issue := range issues {
+		text := strings.ToLower(issue.Message)
+		if strings.Contains(text, "syntax error") {
+			return true
+		}
+	}
+	return false
+}
+
+func deterministicArtifactValidationIssues(issues []artifactValidationIssue) bool {
+	if len(issues) == 0 {
+		return false
+	}
+	for _, issue := range issues {
+		text := strings.ToLower(issue.Message)
+		switch {
+		case strings.Contains(text, "syntax error"),
+			strings.Contains(text, "compile failed"),
+			strings.Contains(text, "references undefined name"),
+			strings.Contains(text, "references missing local export"),
+			strings.Contains(text, "shadows method"),
+			strings.Contains(text, "--smoke branch"),
+			strings.Contains(text, "unconditional interactive loop"),
+			strings.Contains(text, "nested while true"),
+			strings.Contains(text, "missing or unreadable"):
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (m model) suspiciousWorkerRewrites(task coding.Task, files []coding.WorkerFileEdit) []coding.SuspiciousRewrite {
+	rewrites := coding.DetectSuspiciousFileRewrites(m.project.Root, files)
+	if len(rewrites) == 0 || !cohesiveWholeFileArtifactTask(task) {
+		return rewrites
+	}
+	filtered := rewrites[:0]
+	for _, rewrite := range rewrites {
+		reason := strings.ToLower(strings.TrimSpace(rewrite.Reason))
+		if strings.Contains(reason, "placeholder sentinel") || strings.Contains(reason, "diff marker residue") {
+			filtered = append(filtered, rewrite)
+		}
+	}
+	return filtered
+}
+
+func workerBlockerText(blocker string) string {
+	blocker = strings.TrimSpace(blocker)
+	switch strings.ToLower(blocker) {
+	case "", "none", "no", "n/a", "na", "null", "nil", "no blocker", "not applicable":
+		return ""
+	default:
+		return blocker
+	}
+}
+
 func applyWorkerPatchContent(projectRoot string, patch coding.WorkerPatch) (coding.PatchApplyResult, error) {
 	if len(patch.Files) > 0 {
 		return coding.ApplyFileEdits(projectRoot, patch.Files)
@@ -268,12 +423,12 @@ func (m model) blockTaskAfterWorkerApplyFailure(task coding.Task, message string
 
 func (m model) generateWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket) (string, llm.Usage, error) {
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	return client.CompleteWithUsage(ctx, workerPatchMessages(packet), 4096)
+	return client.CompleteWithUsage(ctx, workerPatchMessages(packet), m.workerOutputTokens(packet))
 }
 
 func (m model) repairWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket, raw string, parseErr error) (string, error) {
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	return client.Complete(ctx, workerPatchRepairMessages(packet, raw, parseErr), 4096)
+	return client.Complete(ctx, workerPatchRepairMessages(packet, raw, parseErr), m.workerOutputTokens(packet))
 }
 
 func (m model) workerPatchFromGeneratedJSON(ctx context.Context, packet coding.TaskPacket, raw string) (coding.WorkerPatch, int, error) {
@@ -299,7 +454,7 @@ func (m model) repairWorkerPatchDiff(ctx context.Context, task coding.Task, patc
 		return coding.WorkerPatch{}, err
 	}
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	raw, err := client.Complete(ctx, workerPatchDiffRepairMessages(packet, patch, applyErr), 4096)
+	raw, err := client.Complete(ctx, workerPatchDiffRepairMessages(packet, patch, applyErr), m.workerOutputTokens(packet))
 	if err != nil {
 		return coding.WorkerPatch{}, err
 	}
@@ -336,9 +491,22 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 				"Return a WorkerPatch JSON object.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
-				"For small file edits, prefer files with full replacement content and leave patch empty.",
-				"For larger edits, return a unified diff in patch and leave files empty.",
-				"If you need missing context or cannot safely complete the task, set blocker and leave patch/files empty.",
+				"If context_files includes a file you are editing, treat that file as existing and preserve all unrelated content.",
+				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
+				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty. Do not produce unified diffs for standalone generated outputs.",
+				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
+				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
+				"For existing files, prefer a focused unified diff in patch and leave files empty.",
+				"Use files with full replacement content only for new files, create-only tasks, or explicit whole-file rewrites.",
+				"Follow the task packet artifact contract exactly. HTML fragments must not include doctype/html/head/body. Final index.html tasks must include a complete document. CSS must be plain browser CSS; normal descendant selectors, pseudo-classes, and pseudo-elements are allowed.",
+				"For assembly/wiring tasks, use provided context_files from dependency outputs as source material and preserve their exact copy, asset filenames, commands, and URLs.",
+				"Do not shorten user-provided copy with ellipses or substitute invented repo URLs, filenames, or commands.",
+				"Never replace real existing file content with placeholders such as existing content, rest of file, omitted for brevity, previous content here, or unchanged content comments.",
+				"If existing context contains placeholder sentinel comments, replace them with real task output instead of preserving them.",
+				"File content must not include diff marker residue such as leading + or - characters before HTML tags.",
+				"If the task is complete, set blocker to an empty string.",
+				"If you need missing context or cannot safely complete the task, set blocker to a clear explanation and leave patch/files empty.",
 				"If the task packet includes Repair focus, make only the focused repair requested by the reviewer and keep the original allowed_paths scope.",
 				"Unified diffs must be valid for git apply: include diff --git, ---/+++ file headers, @@ hunk headers with correct line counts, and unchanged context lines.",
 				"Do not edit outside allowed_paths. Do not include prose outside JSON.",
@@ -370,8 +538,21 @@ func workerPatchDiffRepairMessages(packet coding.TaskPacket, patch coding.Worker
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
 				"Keep the same task_id.",
-				"Prefer files with full replacement content for small edits; otherwise return a corrected unified diff in patch.",
-				"Set blocker if you cannot safely repair it.",
+				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
+				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty. Do not repair or return a unified diff.",
+				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
+				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
+				"For existing files, prefer a corrected unified diff in patch and leave files empty.",
+				"Use files with full replacement content only for new files, create-only tasks, or explicit whole-file rewrites.",
+				"Follow the task packet artifact contract exactly. HTML fragments must not include doctype/html/head/body. Final index.html tasks must include a complete document. CSS must be plain browser CSS; normal descendant selectors, pseudo-classes, and pseudo-elements are allowed.",
+				"For assembly/wiring tasks, use provided context_files from dependency outputs as source material and preserve their exact copy, asset filenames, commands, and URLs.",
+				"Do not shorten user-provided copy with ellipses or substitute invented repo URLs, filenames, or commands.",
+				"Never replace real existing file content with placeholders such as existing content, rest of file, omitted for brevity, previous content here, or unchanged content comments.",
+				"If existing context contains placeholder sentinel comments, replace them with real task output instead of preserving them.",
+				"File content must not include diff marker residue such as leading + or - characters before HTML tags.",
+				"If the task is complete, set blocker to an empty string.",
+				"Set blocker to a clear explanation if you cannot safely repair it.",
 				"Unified diffs must be valid for git apply: include diff --git, ---/+++ file headers, @@ hunk headers with correct line counts, and unchanged context lines.",
 				"Do not include prose outside JSON.",
 			}, "\n"),
@@ -396,8 +577,21 @@ func workerPatchRepairMessages(packet coding.TaskPacket, raw string, parseErr er
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
 				"Use the task_id from the task packet.",
-				"For small file edits, prefer files with full replacement content and leave patch empty.",
-				"If a safe patch is not possible, set blocker and leave patch/files empty.",
+				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
+				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty, especially during repair.",
+				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
+				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
+				"For existing files, prefer a focused unified diff in patch and leave files empty.",
+				"Use files with full replacement content only for new files, create-only tasks, or explicit whole-file rewrites.",
+				"Follow the task packet artifact contract exactly. HTML fragments must not include doctype/html/head/body. Final index.html tasks must include a complete document. CSS must be plain browser CSS; normal descendant selectors, pseudo-classes, and pseudo-elements are allowed.",
+				"For assembly/wiring tasks, use provided context_files from dependency outputs as source material and preserve their exact copy, asset filenames, commands, and URLs.",
+				"Do not shorten user-provided copy with ellipses or substitute invented repo URLs, filenames, or commands.",
+				"Never replace real existing file content with placeholders such as existing content, rest of file, omitted for brevity, previous content here, or unchanged content comments.",
+				"If existing context contains placeholder sentinel comments, replace them with real task output instead of preserving them.",
+				"File content must not include diff marker residue such as leading + or - characters before HTML tags.",
+				"If the task is complete, set blocker to an empty string.",
+				"If a safe patch is not possible, set blocker to a clear explanation and leave patch/files empty.",
 				"Do not include prose outside JSON.",
 			}, "\n"),
 		},

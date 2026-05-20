@@ -45,20 +45,36 @@ func taskProgressSummary(plan coding.Plan) string {
 }
 
 func taskProgressBadge(plan coding.Plan) string {
+	return taskProgressBadgeWithSpinner(plan, "")
+}
+
+func taskProgressBadgeWithSpinner(plan coding.Plan, spinnerFrame string) string {
 	progress := taskProgressForPlan(plan)
 	if progress.Total == 0 {
 		return ""
 	}
-	return fmt.Sprintf("task %d/%d %s", progress.Done, progress.Total, taskProgressStatusParts(progress))
+	return fmt.Sprintf("task %d/%d %s", progress.Done, progress.Total, taskProgressStatusPartsWithSpinner(progress, spinnerFrame))
 }
 
 func taskProgressStatusParts(progress taskProgress) string {
+	return taskProgressStatusPartsWithSpinner(progress, "")
+}
+
+func taskProgressStatusPartsWithSpinner(progress taskProgress, spinnerFrame string) string {
 	parts := make([]string, 0, 4)
 	if progress.Running > 0 {
-		parts = append(parts, fmt.Sprintf("%d running", progress.Running))
+		label := fmt.Sprintf("%d running", progress.Running)
+		if strings.TrimSpace(spinnerFrame) != "" {
+			label = fmt.Sprintf("%s %s", spinnerFrame, label)
+		}
+		parts = append(parts, label)
 	}
 	if progress.Reviewing > 0 {
-		parts = append(parts, fmt.Sprintf("%d reviewing", progress.Reviewing))
+		label := fmt.Sprintf("%d reviewing", progress.Reviewing)
+		if strings.TrimSpace(spinnerFrame) != "" && progress.Running == 0 {
+			label = fmt.Sprintf("%s %s", spinnerFrame, label)
+		}
+		parts = append(parts, label)
 	}
 	if progress.Blocked > 0 {
 		parts = append(parts, fmt.Sprintf("%d blocked", progress.Blocked))

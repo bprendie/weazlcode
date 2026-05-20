@@ -151,7 +151,7 @@ func (m model) orchestratorPrompt(prompt string) string {
 	var sections []string
 	worker := m.cfg.ProviderForRole("worker")
 	profile := m.workerCapacityProfile()
-	sections = append(sections, fmt.Sprintf("WeazlCode execution model:\n- Planning/review runs through the orchestrator/reviewer roles.\n- Code changes should be broken into bounded local worker tasks when implementation is requested.\n- Configured worker: %s/%s (%s).\n- Worker constraint: %s",
+	sections = append(sections, fmt.Sprintf("WeazlCode execution model:\n- Planning/review runs through the orchestrator/reviewer roles.\n- Code changes should be broken into bounded local worker tasks when implementation is requested.\n- Generated code should be modular and maintainable: prefer files around 300 lines or less, split interactive apps/games/APIs into focused modules, and avoid giant all-in-one files unless explicitly required.\n- Generated modules should use explicit imports/interfaces; avoid wildcard imports so validation and integration can see stable names.\n- Generated interactive Python apps/games should include a non-interactive --smoke path that exits before the interactive loop.\n- Configured worker: %s/%s (%s).\n- Worker constraint: %s",
 		worker.Type,
 		worker.Model,
 		profile.Label,

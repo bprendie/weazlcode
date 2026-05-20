@@ -89,7 +89,7 @@ func (m model) handleSlashCommand(input string) (tea.Model, tea.Cmd, bool) {
 	case "packet":
 		m.setIDEView("packet", m.packetCommandText())
 	case "approve":
-		return m.approveLatestPlan()
+		return m.approveLatestPlan(approveShouldRun(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0]))))
 	case "reject":
 		return m.rejectLatestPlan(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(input), fields[0])))
 	case "run-task":
@@ -213,6 +213,7 @@ func (m model) cancelModelCommand(raw string) (tea.Model, tea.Cmd, bool) {
 		delete(m.workerRuns, runID)
 		delete(m.cancelWorkerRuns, runID)
 	}
+	m.stopAutonomousRun()
 	m.thinking = false
 	m.addSystemNote("Cancelled active model request.")
 	m.status = "model cancelled"
@@ -261,6 +262,7 @@ func slashHelp() string {
 		"/task [n|id] - show task detail, packet, events, and review state",
 		"/packet - show local-worker packet for the first pending task",
 		"/approve - approve the latest draft plan",
+		"/approve run - approve the latest draft plan and immediately dispatch eligible workers",
 		"/reject [reason] - block the latest plan",
 		"/run-task - mark first pending task running and show its worker packet",
 		"/run-worker - ask configured worker role for a WorkerPatch JSON",
@@ -285,7 +287,7 @@ func commandPaletteText() string {
 		Title    string
 		Commands []string
 	}{
-		{"Plan", []string{"/plan", "/plan generate <request>", "/plan replan [guidance]", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/reject [reason]"}},
+		{"Plan", []string{"/plan", "/plan generate <request>", "/plan replan [guidance]", "/plan edit <task> <field> <value>", "/plan validate", "/tasks", "/task [n|id]", "/approve", "/approve run", "/reject [reason]"}},
 		{"Worker", []string{"/packet", "/run-task", "/run-worker", "/run-workers", "/worker-patch <json>"}},
 		{"Review", []string{"/review-diff", "/reviewer-input", "/run-reviewer", "/review approve [summary]", "/review needs-fix <issue>[;; issue]", "/final-review", "/export-run"}},
 		{"Project", []string{"/project", "/files [query]", "/preview <path>", "/edit <path> [line]", "/debug", "/debug launch <name>", "/attach [task] <path> [start-end]", "/instructions", "/memory [key=value]", "/diagnostics", "/symbols [query]"}},

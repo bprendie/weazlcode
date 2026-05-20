@@ -37,6 +37,17 @@ Local models are responsible for bounded implementation:
 
 Local workers should never receive vague repo-wide prompts like "fix this project." They should receive precise, small, auditable tasks.
 
+### Modular Code North Star
+
+Generated code should be modular by default. This is not just style; it is how the split-brain model stays practical for small local workers.
+
+- Prefer files around 300 lines or less.
+- Files over 300 lines need a concrete reason in the plan.
+- Files over 500 lines should usually be split unless the user explicitly requests a single file or the artifact is inherently single-file.
+- Interactive apps, games, APIs, CLIs, and tools should usually be decomposed into focused modules: domain logic, UI/rendering, persistence/adapters, entrypoint, and smoke/verification.
+- Parallelism should come from clean module boundaries, not fake microtasks.
+- Local workers should own complete small files or tight patches, not sprawling all-in-one artifacts.
+
 ### WeazlCode
 
 WeazlCode is the orchestrator and safety layer:

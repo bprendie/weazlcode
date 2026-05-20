@@ -92,7 +92,7 @@ func allowlistedVerificationCommand(commandText string) bool {
 		return len(args) > 0 && (args[0] == "test" || args[0] == "run")
 	case "python", "python3":
 		if len(args) < 2 || args[0] != "-m" {
-			return false
+			return len(args) == 2 && strings.HasSuffix(args[0], ".py") && args[1] == "--smoke" && !strings.Contains(args[0], "/") && !strings.Contains(args[0], "\\")
 		}
 		return args[1] == "pytest" || args[1] == "unittest" || args[1] == "compileall"
 	case "pytest", "shellcheck":

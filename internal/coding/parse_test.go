@@ -1,6 +1,9 @@
 package coding
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParsePlanJSONRejectsUnknownFields(t *testing.T) {
 	raw := []byte(`{"id":"p","session_id":"s","title":"t","status":"draft","unknown":true}`)
@@ -83,6 +86,42 @@ func TestParseWorkerPatchJSONAllowsFileEdits(t *testing.T) {
 	}
 	if len(patch.Files) != 1 || patch.Files[0].Path != "README.md" || patch.Files[0].Content != "new\n" {
 		t.Fatalf("patch = %#v", patch)
+	}
+}
+
+func TestParseWorkerPatchJSONStripsWholeFileMarkdownFence(t *testing.T) {
+	raw := "{\"task_id\":\"task-1\",\"summary\":\"changed\",\"patch\":\"\",\"files\":[{\"path\":\"app.py\",\"content\":\"```python\\nprint('ok')\\n```\\n\"}]}"
+	patch, err := ParseWorkerPatchJSON([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseWorkerPatchJSON: %v", err)
+	}
+	if len(patch.Files) != 1 || patch.Files[0].Content != "print('ok')\n" {
+		t.Fatalf("patch = %#v", patch)
+	}
+}
+
+func TestParseWorkerPatchJSONRecoversInvalidStringEscapes(t *testing.T) {
+	raw := `{"task_id":"task-1","summary":"changed","patch":"-\.card\n+\.card\n","files":[{"path":"styles.css","content":".card {\n  color: red;\n}\n"}]}`
+	patch, err := ParseWorkerPatchJSON([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseWorkerPatchJSON: %v", err)
+	}
+	if len(patch.Files) != 1 || !strings.Contains(patch.Files[0].Content, ".card") {
+		t.Fatalf("patch = %#v", patch)
+	}
+}
+
+func TestParseWorkerPatchJSONRecoversLooseFileObjects(t *testing.T) {
+	raw := `{"task_id":"task-1","summary":"changed","patch":"","files":[{"path":"index.html","content":"<main>ok</main>\n"},"path":"styles.css","content":"body { color: red; }\n"}`
+	patch, err := ParseWorkerPatchJSON([]byte(raw))
+	if err != nil {
+		t.Fatalf("ParseWorkerPatchJSON: %v", err)
+	}
+	if len(patch.Files) != 2 {
+		t.Fatalf("files = %#v", patch.Files)
+	}
+	if patch.Files[0].Path != "index.html" || patch.Files[1].Path != "styles.css" {
+		t.Fatalf("files = %#v", patch.Files)
 	}
 }
 
