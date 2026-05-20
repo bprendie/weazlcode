@@ -215,6 +215,45 @@ func TestValidatePlanQualityAllowsParallelCodeDraftsWithFinalWiring(t *testing.T
 	}
 }
 
+func TestValidatePlanQualityFlagsInteractiveCoordinatorWithoutLeafDependencies(t *testing.T) {
+	plan := Plan{Tasks: []Task{
+		{ID: "bird", Title: "Bird entity", Goal: "Create pygame bird entity.", AllowedPaths: []string{"src/bird.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "bird exists"}}},
+		{ID: "pipes", Title: "Pipe entity", Goal: "Create pygame pipe entity.", AllowedPaths: []string{"src/pipes.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "pipes exist"}}},
+		{ID: "state", Title: "Game state", Goal: "Create game state with collision and score handling for bird and pipes.", AllowedPaths: []string{"src/game_state.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "state exists"}}},
+		{ID: "main", Title: "Entrypoint", Goal: "Wire modules and smoke mode.", AllowedPaths: []string{"main.py", "src/bird.py", "src/pipes.py", "src/game_state.py"}, DependsOn: []string{"bird", "pipes", "state"}, AcceptanceChecks: []AcceptanceCheck{{Description: "main smoke works"}}},
+	}}
+
+	issues := ValidatePlanQuality(plan)
+	if !qualityIssuesContain(issues, "must depend on generated leaf modules") {
+		t.Fatalf("issues = %#v, want coordinator dependency issue", issues)
+	}
+}
+
+func TestRepairPlanQualityAddsInteractiveCoordinatorDependencies(t *testing.T) {
+	plan := Plan{Tasks: []Task{
+		{ID: "bird", Title: "Bird entity", Goal: "Create pygame bird entity.", AllowedPaths: []string{"src/bird.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "bird exists"}}},
+		{ID: "pipes", Title: "Pipe entity", Goal: "Create pygame pipe entity.", AllowedPaths: []string{"src/pipes.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "pipes exist"}}},
+		{ID: "state", Title: "Game state", Goal: "Create game state with collision and score handling for bird and pipes.", AllowedPaths: []string{"src/game_state.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "state exists"}}},
+		{ID: "main", Title: "Entrypoint", Goal: "Wire modules and smoke mode.", AllowedPaths: []string{"main.py", "src/bird.py", "src/pipes.py", "src/game_state.py"}, DependsOn: []string{"bird", "pipes", "state"}, AcceptanceChecks: []AcceptanceCheck{{Description: "main smoke works"}}},
+	}}
+
+	repaired := RepairPlanQuality(plan)
+	if issues := ValidatePlanQuality(repaired); len(issues) != 0 {
+		t.Fatalf("issues = %#v, want none", issues)
+	}
+	state := repaired.Tasks[2]
+	for _, want := range []string{"bird", "pipes"} {
+		if !stringSliceContains(state.DependsOn, want) {
+			t.Fatalf("state depends_on = %#v, missing %q", state.DependsOn, want)
+		}
+	}
+	for _, want := range []string{"src/bird.py", "src/pipes.py"} {
+		if !stringSliceContains(state.AllowedPaths, want) {
+			t.Fatalf("state allowed_paths = %#v, missing %q", state.AllowedPaths, want)
+		}
+	}
+}
+
 func TestValidatePlanQualityFlagsIntegrationTaskWithoutModuleSurfaces(t *testing.T) {
 	plan := Plan{Tasks: []Task{
 		{ID: "cards", Title: "Cards", Goal: "Create card and deck module.", AllowedPaths: []string{"cards.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "cards module exists"}}},
@@ -226,6 +265,26 @@ func TestValidatePlanQualityFlagsIntegrationTaskWithoutModuleSurfaces(t *testing
 	issues := ValidatePlanQuality(plan)
 	if !qualityIssuesContain(issues, "cannot edit their integration surfaces") {
 		t.Fatalf("issues = %#v, want integration surface issue", issues)
+	}
+}
+
+func TestRepairPlanQualityAddsIntegrationSurfaces(t *testing.T) {
+	plan := Plan{Tasks: []Task{
+		{ID: "cards", Title: "Cards", Goal: "Create card and deck module.", AllowedPaths: []string{"cards.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "cards module exists"}}},
+		{ID: "game", Title: "Game state", Goal: "Create game state module using the card/deck interface contract.", AllowedPaths: []string{"game.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "game module exists"}}},
+		{ID: "renderer", Title: "Renderer", Goal: "Create pygame renderer module using the game state interface contract.", AllowedPaths: []string{"renderer.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "renderer module exists"}}},
+		{ID: "main", Title: "Entrypoint", Goal: "Wire modules and smoke mode.", AllowedPaths: []string{"main.py"}, DependsOn: []string{"cards", "game", "renderer"}, AcceptanceChecks: []AcceptanceCheck{{Description: "main smoke works"}}},
+	}}
+
+	repaired := RepairPlanQuality(plan)
+	if issues := ValidatePlanQuality(repaired); len(issues) != 0 {
+		t.Fatalf("issues = %#v, want none", issues)
+	}
+	main := repaired.Tasks[3]
+	for _, want := range []string{"cards.py", "game.py", "renderer.py"} {
+		if !stringSliceContains(main.AllowedPaths, want) {
+			t.Fatalf("main allowed_paths = %#v, missing %q", main.AllowedPaths, want)
+		}
 	}
 }
 
@@ -319,6 +378,15 @@ func TestValidatePlanQualityAllowsCompactSinglePageStaticPlan(t *testing.T) {
 func qualityIssuesContain(issues []PlanQualityIssue, want string) bool {
 	for _, issue := range issues {
 		if strings.Contains(issue.Message, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}

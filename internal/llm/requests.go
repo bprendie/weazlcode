@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -62,6 +63,79 @@ func (c Client) completeOpenAICompat(ctx context.Context, messages []ChatMessage
 	return strings.TrimSpace(body.Choices[0].Message.Content), usage, nil
 }
 
+func (c Client) completeOpenAICompatStreamGuard(ctx context.Context, messages []ChatMessage, maxTokens int, guard OutputGuard) (string, Usage, error) {
+	reqBody := map[string]any{
+		"model":       c.provider.Model,
+		"messages":    messages,
+		"temperature": 0.2,
+		"stream":      true,
+		"max_tokens":  maxTokens,
+		"stream_options": map[string]any{
+			"include_usage": true,
+		},
+	}
+	resp, err := c.post(ctx, "/v1/chat/completions", reqBody)
+	if err != nil {
+		return "", Usage{}, err
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var usage Usage
+	var content strings.Builder
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") || !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" {
+			break
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
+			Usage *struct {
+				PromptTokens     int `json:"prompt_tokens"`
+				CompletionTokens int `json:"completion_tokens"`
+			} `json:"usage"`
+			Error *struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return strings.TrimSpace(content.String()), usage, err
+		}
+		if chunk.Error != nil {
+			return strings.TrimSpace(content.String()), usage, errors.New(chunk.Error.Message)
+		}
+		if chunk.Usage != nil {
+			usage.InputTokens = chunk.Usage.PromptTokens
+			usage.OutputTokens = chunk.Usage.CompletionTokens
+		}
+		for _, choice := range chunk.Choices {
+			if choice.Delta.Content == "" {
+				continue
+			}
+			content.WriteString(choice.Delta.Content)
+			if err := guard(content.String()); err != nil {
+				return strings.TrimSpace(content.String()), usage, err
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return strings.TrimSpace(content.String()), usage, err
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return "", usage, errors.New("empty completion response")
+	}
+	return strings.TrimSpace(content.String()), usage, nil
+}
+
 func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {
 	reqBody := map[string]any{
 		"model":    c.provider.Model,
@@ -96,6 +170,61 @@ func (c Client) completeOllama(ctx context.Context, messages []ChatMessage, maxT
 		OutputTokens: body.EvalCount,
 	}
 	return strings.TrimSpace(body.Message.Content), usage, nil
+}
+
+func (c Client) completeOllamaStreamGuard(ctx context.Context, messages []ChatMessage, maxTokens int, guard OutputGuard) (string, Usage, error) {
+	reqBody := map[string]any{
+		"model":    c.provider.Model,
+		"messages": ollamaChatMessagesFromChat(messages),
+		"stream":   true,
+		"options": map[string]any{
+			"num_predict": maxTokens,
+			"temperature": 0.2,
+		},
+	}
+	resp, err := c.post(ctx, "/api/chat", reqBody)
+	if err != nil {
+		return "", Usage{}, err
+	}
+	defer resp.Body.Close()
+
+	dec := json.NewDecoder(resp.Body)
+	var content strings.Builder
+	var usage Usage
+	for {
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Done            bool   `json:"done"`
+			PromptEvalCount int    `json:"prompt_eval_count"`
+			EvalCount       int    `json:"eval_count"`
+			Error           string `json:"error"`
+		}
+		if err := dec.Decode(&chunk); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return strings.TrimSpace(content.String()), usage, err
+		}
+		if chunk.Error != "" {
+			return strings.TrimSpace(content.String()), usage, errors.New(chunk.Error)
+		}
+		if chunk.Message.Content != "" {
+			content.WriteString(chunk.Message.Content)
+			if err := guard(content.String()); err != nil {
+				return strings.TrimSpace(content.String()), usage, err
+			}
+		}
+		if chunk.Done {
+			usage.InputTokens = chunk.PromptEvalCount
+			usage.OutputTokens = chunk.EvalCount
+			break
+		}
+	}
+	if strings.TrimSpace(content.String()) == "" {
+		return "", usage, errors.New("empty completion response")
+	}
+	return strings.TrimSpace(content.String()), usage, nil
 }
 
 func (c Client) completeAnthropic(ctx context.Context, messages []ChatMessage, maxTokens int) (string, Usage, error) {

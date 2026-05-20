@@ -36,6 +36,8 @@ type Usage struct {
 	OutputTokens int
 }
 
+type OutputGuard func(content string) error
+
 type StreamEvent struct {
 	Type      string     // "content", "tool_call", "done"
 	Content   string     // Text content chunk
@@ -115,6 +117,23 @@ func (c Client) CompleteWithUsage(ctx context.Context, messages []ChatMessage, m
 		return c.completeOllama(ctx, messages, maxTokens)
 	default:
 		return "", Usage{}, fmt.Errorf("unsupported provider type %q", c.provider.Type)
+	}
+}
+
+func (c Client) CompleteWithUsageGuard(ctx context.Context, messages []ChatMessage, maxTokens int, guard OutputGuard) (string, Usage, error) {
+	if guard == nil {
+		return c.CompleteWithUsage(ctx, messages, maxTokens)
+	}
+	if maxTokens <= 0 {
+		maxTokens = 2048
+	}
+	switch strings.ToLower(c.provider.Type) {
+	case "vllm":
+		return c.completeOpenAICompatStreamGuard(ctx, messages, maxTokens, guard)
+	case "ollama":
+		return c.completeOllamaStreamGuard(ctx, messages, maxTokens, guard)
+	default:
+		return c.CompleteWithUsage(ctx, messages, maxTokens)
 	}
 }
 
@@ -214,6 +233,22 @@ func ollamaChatMessages(history []storage.Message, prompt string) []ollamaMessag
 		messages = append(messages, ollamaMessage{Role: "user", Content: prompt})
 	}
 	return messages
+}
+
+func ollamaChatMessagesFromChat(messages []ChatMessage) []ollamaMessage {
+	out := make([]ollamaMessage, 0, len(messages))
+	for _, message := range messages {
+		content := strings.TrimSpace(message.Content)
+		if content == "" {
+			continue
+		}
+		role := message.Role
+		if role == "" {
+			role = "user"
+		}
+		out = append(out, ollamaMessage{Role: role, Content: content})
+	}
+	return out
 }
 
 func systemPrompt() string {

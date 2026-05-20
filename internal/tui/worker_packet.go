@@ -443,13 +443,27 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 	if err != nil {
 		return coding.TaskPacket{}, err
 	}
+	// Check for path rejection first - it needs explicit guidance
+	if pathRejection, ok := latestPathRejection(events); ok {
+		repairMsg := formatPathRejectionRepairGuidance(pathRejection)
+		packet.Goal = strings.TrimSpace(packet.Goal + "\n\n" + repairMsg)
+		packet.AcceptanceChecks = append(packet.AcceptanceChecks, coding.AcceptanceCheck{
+			Description: "Output files match exactly the allowed paths (no singular/plural variations, no typos).",
+		})
+		return packet, nil
+	}
+
 	repair, ok := latestRepairRequest(events)
 	if !ok {
 		if validation, ok := latestArtifactValidation(events); ok {
+			validationPathGuidance := ""
+			if paths := latestArtifactValidationPaths(events); len(paths) > 0 {
+				validationPathGuidance = "\nYou must edit the file(s) named by validation before touching lower-priority files: " + strings.Join(paths, ", ")
+			}
 			if singleFileGeneratedArtifactTask(task) {
-				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current file, but deterministic artifact validation failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Fix exactly these validator issues:\n" + validation)
+				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current file, but deterministic artifact validation failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Fix exactly these validator issues:\n" + validation + validationPathGuidance)
 			} else {
-				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current files, but deterministic artifact validation failed. Repair the current generated files in place. Fix exactly these validator issues, preserve correct existing content, and do not regenerate unrelated sections:\n" + validation)
+				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current files, but deterministic artifact validation failed. Repair the current generated files in place. If a named file is syntactically broken, truncated, or internally inconsistent, return complete replacement content for that named file. Fix exactly these validator issues, preserve correct existing content, and do not regenerate unrelated sections:\n" + validation + validationPathGuidance)
 			}
 			packet.AcceptanceChecks = append(packet.AcceptanceChecks, artifactValidationRepairCheck())
 			return packet, nil
@@ -464,6 +478,9 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 		validation := ""
 		if latest, ok := latestArtifactValidation(events); ok {
 			validation = "\n\nLatest artifact validation failure:\n" + latest
+			if paths := latestArtifactValidationPaths(events); len(paths) > 0 {
+				validation += "\nYou must edit the file(s) named by validation before touching lower-priority files: " + strings.Join(paths, ", ")
+			}
 		}
 		packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\nThe previous single-file artifact remains in the workspace, but deterministic validation has failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Address the reviewer issues and validation failure below:\n" + repair + validation)
 	} else {
@@ -471,6 +488,87 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 	}
 	packet.AcceptanceChecks = append(packet.AcceptanceChecks, coding.AcceptanceCheck{Description: "Reviewer needs_fix issues are addressed without broadening the task scope."})
 	return packet, nil
+}
+
+type pathRejectionInfo struct {
+	ReturnedPaths  []string
+	AllowedPaths   []string
+	ForbiddenPaths []string
+	Error          string
+}
+
+func latestPathRejection(events []coding.TaskEvent) (pathRejectionInfo, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "repair_requested", "artifact_validation":
+			return pathRejectionInfo{}, false
+		case "worker_rejected":
+		default:
+			continue
+		}
+		if len(events[i].Payload) == 0 {
+			continue
+		}
+		var payload struct {
+			Paths          []string `json:"paths"`
+			AllowedPaths   []string `json:"allowed_paths"`
+			ForbiddenPaths []string `json:"forbidden_paths"`
+			Error          string   `json:"error"`
+		}
+		if err := json.Unmarshal(events[i].Payload, &payload); err != nil {
+			continue
+		}
+		// Only return if this is actually a path rejection (has paths info)
+		if len(payload.Paths) > 0 || len(payload.AllowedPaths) > 0 {
+			return pathRejectionInfo{
+				ReturnedPaths:  payload.Paths,
+				AllowedPaths:   payload.AllowedPaths,
+				ForbiddenPaths: payload.ForbiddenPaths,
+				Error:          payload.Error,
+			}, true
+		}
+	}
+	return pathRejectionInfo{}, false
+}
+
+func formatPathRejectionRepairGuidance(info pathRejectionInfo) string {
+	var b strings.Builder
+	b.WriteString("Path rejection repair focus:\n")
+	b.WriteString("Your previous output returned file paths that are outside the allowed scope for this task.\n\n")
+
+	if len(info.ReturnedPaths) > 0 {
+		b.WriteString("Paths you returned:\n")
+		for _, path := range info.ReturnedPaths {
+			fmt.Fprintf(&b, "  - %s\n", path)
+		}
+		b.WriteString("\n")
+	}
+
+	if len(info.AllowedPaths) > 0 {
+		b.WriteString("Allowed paths for this task:\n")
+		for _, path := range info.AllowedPaths {
+			fmt.Fprintf(&b, "  - %s\n", path)
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString("Allowed paths: none (this task has no file output scope)\n\n")
+	}
+
+	if len(info.ForbiddenPaths) > 0 {
+		b.WriteString("Forbidden paths (must not touch):\n")
+		for _, path := range info.ForbiddenPaths {
+			fmt.Fprintf(&b, "  - %s\n", path)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("CRITICAL: You must produce output ONLY for the exact allowed paths listed above.\n")
+	b.WriteString("- Use the exact path names as specified (check for singular/plural, typos, case sensitivity)\n")
+	b.WriteString("- If this appears to be a simple naming mistake (e.g., 'pipe.py' vs 'pipes.py'), use the allowed path exactly\n")
+	b.WriteString("- Do not create, modify, or reference any files outside the allowed paths\n")
+	b.WriteString("- If you cannot complete the task with only the allowed paths, return a blocker explaining why\n")
+
+	return b.String()
 }
 
 func renderJSON(v any) string {

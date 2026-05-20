@@ -818,6 +818,7 @@ func (m model) planFromGeneratedJSON(raw string) (coding.Plan, error) {
 	}
 	plan = coding.PrepareImportedPlan(plan, m.session.ID, m.project.Root, uuid.NewString)
 	normalizePlanVerification(&plan)
+	plan = coding.RepairPlanQuality(plan)
 	if err := coding.ValidatePlan(plan); err != nil {
 		return coding.Plan{}, err
 	}

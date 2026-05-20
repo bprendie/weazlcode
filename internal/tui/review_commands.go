@@ -17,8 +17,8 @@ import (
 	"github.com/bprendie/weazlcode/internal/project"
 )
 
-const maxRepairAttempts = 4
-const maxArtifactRepairAttempts = 4
+const maxRepairAttempts = 3
+const maxArtifactRepairAttempts = 3
 
 func (m model) reviewerInputCommandText() string {
 	input, err := m.buildReviewerInput()

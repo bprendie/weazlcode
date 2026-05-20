@@ -797,7 +797,7 @@ func TestSlashWorkerPatchAppliesPatchAndMarksReviewing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 5 || events[3].Type != "worker_patch" || events[4].Type != "verification" || len(events[4].Payload) == 0 {
+	if len(events) != 6 || events[3].Type != "worker_patch_attempt" || events[4].Type != "worker_patch" || events[5].Type != "verification" || len(events[5].Payload) == 0 {
 		t.Fatalf("events = %#v", events)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(root, ".weazlcode", "runs", got.session.ID))
@@ -980,7 +980,7 @@ func TestSlashWorkerPatchRejectsPathsOutsideTaskScope(t *testing.T) {
 	}
 	got := updated.(model)
 	if got.status != "worker patch rejected" {
-		t.Fatalf("status = %q, want worker patch rejected", got.status)
+		t.Fatalf("status = %q, want worker patch rejected; view:\n%s", got.status, got.viewport.View())
 	}
 	plan, ok, err = got.store.LatestPlan(got.session.ID)
 	if err != nil {
@@ -1240,12 +1240,12 @@ func TestArtifactValidationEscalatesAfterRepeatedLocalFailures(t *testing.T) {
 		t.Fatal("approve handled = false")
 	}
 	m = updated.(model)
-	invalidPatch := func(taskID string) string {
+	invalidPatch := func(taskID string, attempt int) string {
 		rawPatch, err := json.Marshal(coding.WorkerPatch{
 			TaskID:  taskID,
 			Summary: "Invalid artifact",
 			Files: []coding.WorkerFileEdit{
-				{Path: "index.html", Content: "<!doctype html>\n<html><head><style>body{}</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>new artifact</main></body></html>\n"},
+				{Path: "index.html", Content: fmt.Sprintf("<!doctype html>\n<html><head><style>body{}</style><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main>new artifact %d</main></body></html>\n", attempt)},
 				{Path: "styles.css", Content: ".card: hover { color: red; }\n"},
 			},
 		})
@@ -1260,7 +1260,7 @@ func TestArtifactValidationEscalatesAfterRepeatedLocalFailures(t *testing.T) {
 			t.Fatalf("run-task handled = false on attempt %d", attempt)
 		}
 		m = updated.(model)
-		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch("artifact"))
+		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch("artifact", attempt))
 		if !handled {
 			t.Fatalf("worker-patch handled = false on attempt %d", attempt)
 		}
@@ -1307,11 +1307,11 @@ func TestDeterministicArtifactValidationGetsMoreLocalRepairPasses(t *testing.T) 
 		t.Fatal("approve handled = false")
 	}
 	m = updated.(model)
-	invalidPatch := func() string {
+	invalidPatch := func(attempt int) string {
 		rawPatch, err := json.Marshal(coding.WorkerPatch{
 			TaskID:  "script",
 			Summary: "Invalid Python",
-			Files:   []coding.WorkerFileEdit{{Path: "app.py", Content: "def broken(:\n    pass\n"}},
+			Files:   []coding.WorkerFileEdit{{Path: "app.py", Content: fmt.Sprintf("def main_%d():\n    return missing_name_%d\n", attempt, attempt)}},
 		})
 		if err != nil {
 			t.Fatalf("Marshal: %v", err)
@@ -1324,7 +1324,7 @@ func TestDeterministicArtifactValidationGetsMoreLocalRepairPasses(t *testing.T) 
 			t.Fatalf("run-task handled = false on attempt %d", attempt)
 		}
 		m = updated.(model)
-		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch())
+		updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch(attempt))
 		if !handled {
 			t.Fatalf("worker-patch handled = false on attempt %d", attempt)
 		}
@@ -1345,7 +1345,7 @@ func TestDeterministicArtifactValidationGetsMoreLocalRepairPasses(t *testing.T) 
 		t.Fatal("run-task handled = false on final attempt")
 	}
 	m = updated.(model)
-	updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch())
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + invalidPatch(maxDeterministicArtifactRepairPasses))
 	if !handled {
 		t.Fatal("worker-patch handled = false on final attempt")
 	}
@@ -1359,6 +1359,52 @@ func TestDeterministicArtifactValidationGetsMoreLocalRepairPasses(t *testing.T) 
 	}
 	if plan.Tasks[0].Status != coding.TaskStatusReviewing {
 		t.Fatalf("task status = %s, want reviewing", plan.Tasks[0].Status)
+	}
+}
+
+func TestDetectIdenticalRepairUsesPatchAttemptEvents(t *testing.T) {
+	patch := coding.WorkerPatch{
+		TaskID:  "script",
+		Summary: "Repair script",
+		Files:   []coding.WorkerFileEdit{{Path: "app.py", Content: "print('same')\n"}},
+	}
+	payload, err := json.Marshal(struct {
+		Hash string `json:"hash"`
+	}{Hash: hashWorkerPatch(patch)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	events := []coding.TaskEvent{
+		{Type: "repair_start", Message: "repair started"},
+		{Type: "worker_patch_attempt", Payload: payload},
+	}
+	if !repairCycleActive(events) {
+		t.Fatalf("repairCycleActive = false")
+	}
+	if !detectIdenticalRepair(patch, events) {
+		t.Fatalf("detectIdenticalRepair = false, want true")
+	}
+	changed := patch
+	changed.Files = []coding.WorkerFileEdit{{Path: "app.py", Content: "print('changed')\n"}}
+	if detectIdenticalRepair(changed, events) {
+		t.Fatalf("detectIdenticalRepair changed patch = true, want false")
+	}
+}
+
+func TestRepairEffectivenessUsesValidationFingerprints(t *testing.T) {
+	repeated := []coding.TaskEvent{
+		{Type: "artifact_validation", Message: "Artifact validation failed before reviewer handoff.\n- app.py: function main references undefined name event"},
+		{Type: "artifact_validation", Message: "Artifact validation failed before reviewer handoff.\n- app.py: function main references undefined name event"},
+	}
+	if repairEffectiveness(repeated) {
+		t.Fatalf("repairEffectiveness repeated issue = true, want false")
+	}
+	changed := []coding.TaskEvent{
+		{Type: "artifact_validation", Message: "Artifact validation failed before reviewer handoff.\n- app.py: function main references undefined name event"},
+		{Type: "artifact_validation", Message: "Artifact validation failed before reviewer handoff.\n- app.py: function main references undefined name font"},
+	}
+	if !repairEffectiveness(changed) {
+		t.Fatalf("repairEffectiveness changed issue = false, want true")
 	}
 }
 
@@ -1699,6 +1745,185 @@ if __name__ == "__main__":
 	}
 }
 
+func TestArtifactValidationAllowsLoopVariableInsideLoop(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `class Pipe:
+    def update(self):
+        pass
+
+def tick(pipes):
+    stale = []
+    for pipe in pipes:
+        pipe.update()
+        if pipe in stale:
+            stale.remove(pipe)
+    for pipe in stale:
+        pipes.remove(pipe)
+`
+	if err := os.WriteFile(filepath.Join(root, "state.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile state: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build state module",
+		Goal:         "Create a Python game state module.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"state.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "loop-scoped local pipe") {
+			t.Fatalf("unexpected loop-scoped issue: %#v", issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsLoopNameReassignedAfterLoop(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `class Pipe:
+    def __init__(self, x):
+        self.x = x
+    def update(self):
+        pass
+    def is_off_screen(self):
+        return False
+
+class GameState:
+    def __init__(self):
+        self.pipes = []
+
+    def update(self):
+        for pipe in self.pipes[:]:
+            pipe.update()
+            if pipe.is_off_screen():
+                self.pipes.remove(pipe)
+        pipe = Pipe(100)
+        self.pipes.append(pipe)
+`
+	if err := os.WriteFile(filepath.Join(root, "entities.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile entities: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build game entities",
+		Goal:         "Create a Python game state module.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"entities.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "loop-scoped local pipe") {
+			t.Fatalf("unexpected loop-scoped issue: %#v", issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsTopLevelLoopAndComprehensionTargets(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `items = [1, 2, 3]
+running = True
+while running:
+    for event in items:
+        if event == 2:
+            running = False
+    best = max(p for p in items if p > 0)
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build Python entrypoint",
+		Goal:         "Create a Python entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "undefined name event") || strings.Contains(issue.Message, "undefined name p") {
+			t.Fatalf("unexpected module target issue: %#v", issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsTopLevelConditionalFunctionDefinitions(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import sys
+
+if "--smoke" in sys.argv:
+    def smoke_test():
+        return 0
+    smoke_test()
+
+if __name__ == "__main__":
+    def main():
+        return 0
+    main()
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build entrypoint",
+		Goal:         "Create a Python entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "undefined name main") || strings.Contains(issue.Message, "undefined name smoke_test") {
+			t.Fatalf("unexpected module undefined issue: %#v", issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsPreviouslyInitializedLocalsAssignedInBranches(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `def main():
+    score = 0
+    game_over = False
+    running = True
+    while running:
+        if not game_over:
+            score += 1
+        if score > 10:
+            game_over = True
+        print(score, game_over)
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build entrypoint",
+		Goal:         "Create a Python entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "conditional-scoped local score") || strings.Contains(issue.Message, "conditional-scoped local game_over") {
+			t.Fatalf("unexpected conditional-scoped issue: %#v", issues)
+		}
+	}
+}
+
 func TestArtifactValidationAllowsPythonClosureHelpers(t *testing.T) {
 	m := commandTestModel(t)
 	root := t.TempDir()
@@ -1984,18 +2209,21 @@ func TestSlashWorkerPatchRejectsDiffForSingleFileGeneratedArtifact(t *testing.T)
 		t.Fatal("plan import handled = false")
 	}
 	m = updated.(model)
-	updated, _, handled = m.handleSlashCommand("/approve")
-	if !handled {
-		t.Fatal("approve handled = false")
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan: %v", err)
 	}
-	m = updated.(model)
-	updated, _, handled = m.handleSlashCommand("/run-task")
-	if !handled {
-		t.Fatal("run-task handled = false")
+	if !ok || len(plan.Tasks) != 1 {
+		t.Fatalf("plan = %#v ok=%v", plan, ok)
 	}
-	m = updated.(model)
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
+		t.Fatalf("UpdatePlanStatus: %v", err)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusRunning); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
 	rawPatch, err := json.Marshal(coding.WorkerPatch{
-		TaskID:  "game",
+		TaskID:  plan.Tasks[0].ID,
 		Summary: "Diff output",
 		Patch: `diff --git a/blackjack.py b/blackjack.py
 new file mode 100644
@@ -2014,9 +2242,9 @@ new file mode 100644
 	}
 	got := updated.(model)
 	if got.status != "worker patch rejected" {
-		t.Fatalf("status = %q, want worker patch rejected", got.status)
+		t.Fatalf("status = %q, want worker patch rejected; view:\n%s", got.status, got.viewport.View())
 	}
-	events, err := got.store.TaskEvents("game")
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
@@ -2080,5 +2308,346 @@ func TestWorkerPatchTelemetryAddsTaskEvent(t *testing.T) {
 	}
 	if !strings.Contains(string(modelEvent.Payload), `"latency_ms":123`) || !strings.Contains(string(modelEvent.Payload), `"json_repair_attempts":1`) {
 		t.Fatalf("telemetry payload = %s", modelEvent.Payload)
+	}
+}
+
+func TestRepeatedWorkerRejectionStopsRetry(t *testing.T) {
+	payload := json.RawMessage(`{"paths":["src/pipe.py"],"allowed_paths":["src/pipes.py"],"error":"patch path \"src/pipe.py\" is outside allowed paths"}`)
+	events := []coding.TaskEvent{
+		{Type: "approval", Message: "approved"},
+		{Type: "worker_start", Message: "started"},
+		{Type: "worker_rejected", Message: "Worker patch rejected: returned paths are outside the task scope.", Payload: payload},
+	}
+	if !retryableWorkerErrorTask(events) {
+		t.Fatalf("first worker rejection should allow one retry: %#v", events)
+	}
+	events = append(events,
+		coding.TaskEvent{Type: "repair_start", Message: "retry"},
+		coding.TaskEvent{Type: "worker_rejected", Message: "Worker patch rejected: returned paths are outside the task scope.", Payload: payload},
+	)
+	if retryableWorkerErrorTask(events) {
+		t.Fatalf("repeated identical worker rejection should stop retrying: %#v", events)
+	}
+}
+
+func TestDeterministicReviewerIssueGetsOneBonusRepairAttempt(t *testing.T) {
+	verdictPayload, err := json.Marshal(coding.ReviewVerdict{
+		Verdict: coding.ReviewNeedsFix,
+		Summary: "The repair has a missing import and an undefined name.",
+		Issues:  []string{"random is not imported"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal verdict: %v", err)
+	}
+	events := []coding.TaskEvent{
+		{Type: "artifact_validation", Message: "interactive Python/Pygame artifact has no --smoke path"},
+		{Type: "repair_requested"},
+		{Type: "artifact_validation", Message: "interactive Python/Pygame artifact has no --smoke path"},
+		{Type: "repair_requested"},
+		{Type: "reviewer_verdict", Payload: verdictPayload},
+		{Type: "repair_requested"},
+	}
+	if got := repairAttemptLimit(coding.Task{}, events); got != maxRepairAttempts+1 {
+		t.Fatalf("repairAttemptLimit = %d, want %d", got, maxRepairAttempts+1)
+	}
+	if !repairableTask(coding.Task{}, events) {
+		t.Fatalf("deterministic reviewer issue should be repairable for one bonus attempt")
+	}
+}
+
+func TestRuntimeTypeErrorGetsOneBonusRepairAttempt(t *testing.T) {
+	verdictPayload, err := json.Marshal(coding.ReviewVerdict{
+		Verdict: coding.ReviewNeedsFix,
+		Summary: "The smoke test fails with TypeError: Bird.__init__() missing 2 required positional arguments: 'x' and 'y'.",
+		Issues:  []string{"Fix the constructor call in the entrypoint."},
+	})
+	if err != nil {
+		t.Fatalf("Marshal verdict: %v", err)
+	}
+	events := []coding.TaskEvent{
+		{Type: "repair_requested"},
+		{Type: "repair_requested"},
+		{Type: "reviewer_verdict", Payload: verdictPayload},
+		{Type: "repair_requested"},
+	}
+	if got := repairAttemptLimit(coding.Task{}, events); got != maxRepairAttempts+1 {
+		t.Fatalf("repairAttemptLimit = %d, want %d", got, maxRepairAttempts+1)
+	}
+	if !repairableTask(coding.Task{}, events) {
+		t.Fatalf("runtime type error should be repairable for one bonus attempt")
+	}
+}
+
+func TestBuildWorkerPacketAddsPathRejectionGuidance(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Pipe module","summary":"Create pipe module","tasks":[{"id":"pipes","title":"Create pipe module","goal":"Build a generated Python pipe module.","allowed_paths":["src/pipes.py"],"acceptance_checks":[{"description":"src/pipes.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	payload := json.RawMessage(`{"paths":["src/pipe.py"],"allowed_paths":["src/pipes.py"],"error":"patch path \"src/pipe.py\" is outside allowed paths"}`)
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "worker_rejected", Message: "Worker patch rejected: returned paths are outside the task scope.", Payload: payload}); err != nil {
+		t.Fatalf("AddTaskEvent: %v", err)
+	}
+	plan, _, err = m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan refresh: %v", err)
+	}
+	packet, err := m.buildWorkerPacketForRun(plan.Tasks[0])
+	if err != nil {
+		t.Fatalf("buildWorkerPacketForRun: %v", err)
+	}
+	for _, want := range []string{"Path rejection repair focus", "src/pipe.py", "src/pipes.py", "exact allowed paths"} {
+		if !strings.Contains(packet.Goal, want) {
+			t.Fatalf("packet goal missing %q:\n%s", want, packet.Goal)
+		}
+	}
+}
+
+func TestBuildWorkerPacketIgnoresStalePathRejectionAfterRepairRequest(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Pipe module","summary":"Create pipe module","tasks":[{"id":"pipes","title":"Create pipe module","goal":"Build a generated Python pipe module.","allowed_paths":["src/pipes.py"],"acceptance_checks":[{"description":"src/pipes.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusBlocked); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	payload := json.RawMessage(`{"paths":["src/pipe.py"],"allowed_paths":["src/pipes.py"],"error":"patch path \"src/pipe.py\" is outside allowed paths"}`)
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "worker_rejected", Message: "Worker patch rejected: returned paths are outside the task scope.", Payload: payload}); err != nil {
+		t.Fatalf("AddTaskEvent worker_rejected: %v", err)
+	}
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "repair_requested", Message: "Fix the draw(self, screen) signature."}); err != nil {
+		t.Fatalf("AddTaskEvent repair_requested: %v", err)
+	}
+	plan, _, err = m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan refresh: %v", err)
+	}
+	packet, err := m.buildWorkerPacketForRun(plan.Tasks[0])
+	if err != nil {
+		t.Fatalf("buildWorkerPacketForRun: %v", err)
+	}
+	if strings.Contains(packet.Goal, "Path rejection repair focus") {
+		t.Fatalf("packet used stale path rejection instead of latest repair request:\n%s", packet.Goal)
+	}
+	if !strings.Contains(packet.Goal, "Fix the draw(self, screen) signature") {
+		t.Fatalf("packet missing repair request:\n%s", packet.Goal)
+	}
+}
+
+func TestWorkerPatchAutoCorrectsGeneratedPathMismatch(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	rawPlan := `{"title":"Pipe module","summary":"Create pipe module","tasks":[{"id":"pipes","title":"Create pipe module","goal":"Build a generated Python pipe module.","allowed_paths":["src/pipes.py"],"acceptance_checks":[{"description":"src/pipes.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
+		t.Fatalf("UpdatePlanStatus: %v", err)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusRunning); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Create pipe module",
+		Files: []coding.WorkerFileEdit{{
+			Path:    "src/pipe.py",
+			Content: "class Pipe:\n    pass\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing; view:\n%s", got.status, got.viewport.View())
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "pipes.py")); err != nil {
+		t.Fatalf("corrected file not written: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src", "pipe.py")); !os.IsNotExist(err) {
+		t.Fatalf("uncorrected file exists or stat failed unexpectedly: %v", err)
+	}
+	events, err := got.store.TaskEvents(plan.Tasks[0].ID)
+	if err != nil {
+		t.Fatalf("TaskEvents: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.Type == "worker_path_corrected" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("worker_path_corrected event missing: %#v", events)
+	}
+}
+
+func TestWorkerPatchAutoCorrectsRepairPathMismatchForExistingAllowedFile(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "pipes.py"), []byte("BROKEN = True\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile pipes: %v", err)
+	}
+	rawPlan := `{"title":"Pipe module","summary":"Create pipe module","tasks":[{"id":"pipes","title":"Create pipe module","goal":"Build a generated Python pipe module.","allowed_paths":["src/pipes.py"],"acceptance_checks":[{"description":"src/pipes.py exists"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
+		t.Fatalf("UpdatePlanStatus: %v", err)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusRunning); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "repair_requested", Message: "Fix existing generated file."}); err != nil {
+		t.Fatalf("AddTaskEvent repair_requested: %v", err)
+	}
+	plan, _, err = m.store.LatestPlan(m.session.ID)
+	if err != nil {
+		t.Fatalf("LatestPlan refresh: %v", err)
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Repair pipe module",
+		Files: []coding.WorkerFileEdit{{
+			Path:    "src/pipe.py",
+			Content: "class Pipe:\n    pass\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "task reviewing" {
+		t.Fatalf("status = %q, want task reviewing; view:\n%s", got.status, got.viewport.View())
+	}
+	content, err := os.ReadFile(filepath.Join(root, "src", "pipes.py"))
+	if err != nil {
+		t.Fatalf("ReadFile pipes: %v", err)
+	}
+	if !strings.Contains(string(content), "class Pipe") || strings.Contains(string(content), "BROKEN") {
+		t.Fatalf("pipes.py not replaced with corrected repair content:\n%s", content)
+	}
+}
+
+func TestWorkerPatchRejectsRepairThatMissesValidationPath(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	m.project.StateDir = filepath.Join(root, ".weazlcode")
+	m.project.LogDir = filepath.Join(root, ".weazlcode", "logs")
+	m.session.ProjectRoot = root
+	for _, file := range []string{"main.py", "src/pipes.py"} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.Dir(file)), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(root, file), []byte("BROKEN = True\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile %s: %v", file, err)
+		}
+	}
+	rawPlan := `{"title":"Entrypoint","summary":"Fix main","tasks":[{"id":"main","title":"Main entrypoint","goal":"Create a Python entrypoint.","allowed_paths":["main.py","src/pipes.py"],"acceptance_checks":[{"description":"main works"}]}]}`
+	updated, _, handled := m.handleSlashCommand("/plan import " + rawPlan)
+	if !handled {
+		t.Fatal("plan import handled = false")
+	}
+	m = updated.(model)
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		t.Fatalf("LatestPlan: %v ok=%v", err, ok)
+	}
+	if err := m.store.UpdatePlanStatus(plan.ID, coding.PlanStatusApproved); err != nil {
+		t.Fatalf("UpdatePlanStatus: %v", err)
+	}
+	if err := m.store.UpdateTaskStatus(plan.Tasks[0].ID, coding.TaskStatusRunning); err != nil {
+		t.Fatalf("UpdateTaskStatus: %v", err)
+	}
+	validationPayload := json.RawMessage(`{"issues":[{"path":"main.py","message":"syntax error"}]}`)
+	if _, err := m.store.AddTaskEvent(coding.TaskEvent{TaskID: plan.Tasks[0].ID, Type: "artifact_validation", Message: "main.py syntax error", Payload: validationPayload}); err != nil {
+		t.Fatalf("AddTaskEvent artifact_validation: %v", err)
+	}
+	rawPatch, err := json.Marshal(coding.WorkerPatch{
+		TaskID:  plan.Tasks[0].ID,
+		Summary: "Touch unrelated file",
+		Files: []coding.WorkerFileEdit{{
+			Path:    "src/pipes.py",
+			Content: "OK = True\n",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	updated, _, handled = m.handleSlashCommand("/worker-patch " + string(rawPatch))
+	if !handled {
+		t.Fatal("worker-patch handled = false")
+	}
+	got := updated.(model)
+	if got.status != "worker patch rejected" {
+		t.Fatalf("status = %q, want worker patch rejected; view:\n%s", got.status, got.viewport.View())
+	}
+}
+
+func TestWorkerOutputGuardKillsRepeatedOutput(t *testing.T) {
+	m := commandTestModel(t)
+	guard := m.workerOutputGuard(4096)
+	repeated := strings.Repeat("        self.score = 0\n        self.bird = Bird(self.width // 2, self.height // 2)\n        self.pipe_manager = PipeManager()\n", 12)
+	if err := guard(`{"task_id":"task","files":[{"path":"game.py","content":"` + repeated); err == nil {
+		t.Fatal("workerOutputGuard returned nil error for repeated output")
 	}
 }

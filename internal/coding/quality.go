@@ -13,6 +13,79 @@ type PlanQualityIssue struct {
 	Message   string `json:"message"`
 }
 
+func RepairPlanQuality(plan Plan) Plan {
+	repairInteractivePythonCoordinatorDependencies(plan.Tasks)
+	repairDependencyIntegrationAllowedPaths(plan.Tasks)
+	return plan
+}
+
+func repairInteractivePythonCoordinatorDependencies(tasks []Task) {
+	if !interactivePythonPlan(tasks) {
+		return
+	}
+	var leafTasks []Task
+	for _, task := range tasks {
+		if !singleCodeFileTask(task) || pythonEntrypointTask(task) || pythonCoordinatorTask(task) {
+			continue
+		}
+		leafTasks = append(leafTasks, task)
+	}
+	if len(leafTasks) < 2 {
+		return
+	}
+	for i := range tasks {
+		if !singleCodeFileTask(tasks[i]) || !pythonCoordinatorTask(tasks[i]) {
+			continue
+		}
+		for _, leaf := range leafTasks {
+			if strings.TrimSpace(leaf.ID) == "" || leaf.ID == tasks[i].ID {
+				continue
+			}
+			leafPath := normalizedTaskPaths(leaf.AllowedPaths)[0]
+			tasks[i].DependsOn = appendUniqueString(tasks[i].DependsOn, leaf.ID)
+			tasks[i].AllowedPaths = appendUniqueString(tasks[i].AllowedPaths, leafPath)
+			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, leafPath)
+		}
+	}
+}
+
+func repairDependencyIntegrationAllowedPaths(tasks []Task) {
+	byID := map[string]Task{}
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) != "" {
+			byID[task.ID] = task
+		}
+	}
+	for i := range tasks {
+		if len(tasks[i].DependsOn) < 2 || !integrationLikeTask(tasks[i]) && !singleCodeFileTask(tasks[i]) {
+			continue
+		}
+		for _, depID := range tasks[i].DependsOn {
+			dep, ok := byID[strings.TrimSpace(depID)]
+			if !ok || !singleCodeFileTask(dep) {
+				continue
+			}
+			depPath := normalizedTaskPaths(dep.AllowedPaths)[0]
+			tasks[i].AllowedPaths = appendUniqueString(tasks[i].AllowedPaths, depPath)
+			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, depPath)
+		}
+	}
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	clean := filepath.ToSlash(filepath.Clean(value))
+	for _, existing := range values {
+		if filepath.ToSlash(filepath.Clean(strings.TrimSpace(existing))) == clean {
+			return values
+		}
+	}
+	return append(values, clean)
+}
+
 func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 	var issues []PlanQualityIssue
 	if len(plan.Tasks) == 0 {
@@ -82,7 +155,51 @@ func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 			Message:  "generated interactive Python app/game plan is single-file; split into module tasks for domain state, rendering/entities, entrypoint, and smoke verification unless the user explicitly requested one file",
 		})
 	}
+	issues = append(issues, interactivePythonCoordinatorDependencyIssues(plan.Tasks)...)
 	issues = append(issues, integrationTaskScopeIssues(plan.Tasks)...)
+	return issues
+}
+
+func interactivePythonCoordinatorDependencyIssues(tasks []Task) []PlanQualityIssue {
+	if !interactivePythonPlan(tasks) {
+		return nil
+	}
+	var leafTasks []Task
+	for _, task := range tasks {
+		if !singleCodeFileTask(task) || pythonEntrypointTask(task) || pythonCoordinatorTask(task) {
+			continue
+		}
+		leafTasks = append(leafTasks, task)
+	}
+	if len(leafTasks) < 2 {
+		return nil
+	}
+	var issues []PlanQualityIssue
+	for _, task := range tasks {
+		if !singleCodeFileTask(task) || !pythonCoordinatorTask(task) {
+			continue
+		}
+		deps := map[string]bool{}
+		for _, dep := range task.DependsOn {
+			deps[strings.TrimSpace(dep)] = true
+		}
+		var missing []string
+		for _, leaf := range leafTasks {
+			if leaf.ID == "" || leaf.ID == task.ID || deps[leaf.ID] {
+				continue
+			}
+			missing = append(missing, leaf.ID)
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		issues = append(issues, PlanQualityIssue{
+			TaskID:    task.ID,
+			TaskTitle: task.Title,
+			Severity:  "error",
+			Message:   fmt.Sprintf("interactive Python coordinator task must depend on generated leaf modules so workers get real interfaces instead of guessing; add depends_on: %s", strings.Join(missing, ", ")),
+		})
+	}
 	return issues
 }
 
@@ -269,6 +386,61 @@ func interactivePythonPlanSingleFile(tasks []Task) bool {
 	}
 	for _, marker := range []string{"game", "interactive", "flappy", "blackjack", "player", "render"} {
 		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func interactivePythonPlan(tasks []Task) bool {
+	pythonFiles := 0
+	var text strings.Builder
+	for _, task := range tasks {
+		text.WriteString(" ")
+		text.WriteString(task.Title)
+		text.WriteString(" ")
+		text.WriteString(task.Goal)
+		text.WriteString(" ")
+		text.WriteString(acceptanceCheckText(task.AcceptanceChecks))
+		for _, path := range normalizedTaskPaths(task.AllowedPaths) {
+			if strings.HasSuffix(strings.ToLower(path), ".py") {
+				pythonFiles++
+			}
+		}
+	}
+	if pythonFiles < 3 {
+		return false
+	}
+	lower := strings.ToLower(text.String())
+	if !strings.Contains(lower, "pygame") {
+		return false
+	}
+	for _, marker := range []string{"game", "interactive", "flappy", "blackjack", "render", "player"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func pythonEntrypointTask(task Task) bool {
+	for _, path := range normalizedTaskPaths(task.AllowedPaths) {
+		lower := strings.ToLower(path)
+		if lower == "main.py" || strings.HasSuffix(lower, "/main.py") || lower == "app.py" || strings.HasSuffix(lower, "/app.py") {
+			return true
+		}
+	}
+	text := strings.ToLower(task.Title + " " + task.Goal + " " + acceptanceCheckText(task.AcceptanceChecks))
+	return strings.Contains(text, "entrypoint") || strings.Contains(text, "main.py") || strings.Contains(text, "smoke")
+}
+
+func pythonCoordinatorTask(task Task) bool {
+	if pythonEntrypointTask(task) {
+		return false
+	}
+	text := strings.ToLower(task.Title + " " + task.Goal + " " + acceptanceCheckText(task.AcceptanceChecks) + " " + strings.Join(normalizedTaskPaths(task.AllowedPaths), " "))
+	for _, marker := range []string{"game_state", "game state", "state manager", "coordinator", "collision", "score"} {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}

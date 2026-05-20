@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -23,7 +24,7 @@ func (m model) firstRunnableTask(tasks []coding.Task) (coding.Task, bool, error)
 		if repairableTask(task, events) {
 			return task, true, nil
 		}
-		if retryableWorkerErrorTask(events) {
+		if m.retryableWorkerErrorTask(task, events) {
 			return task, true, nil
 		}
 	}
@@ -93,7 +94,7 @@ func (m model) parallelRunnableTasks(tasks []coding.Task, limit int) ([]coding.T
 		if err != nil {
 			return false, err
 		}
-		return retryableWorkerErrorTask(events) || repairableTask(task, events), nil
+		return m.retryableWorkerErrorTask(task, events) || repairableTask(task, events), nil
 	})
 }
 
@@ -203,6 +204,9 @@ func repairableTask(task coding.Task, events []coding.TaskEvent) bool {
 	if repairAttemptCount(events) >= repairAttemptLimit(task, events) {
 		return false
 	}
+	if repairAttemptCount(events) >= 2 && !repairEffectiveness(events) && !latestReviewerNeedsDeterministicRepair(events) {
+		return false
+	}
 	repairRequested := false
 	for i := len(events) - 1; i >= 0; i-- {
 		switch events[i].Type {
@@ -226,15 +230,94 @@ func repairableTask(task coding.Task, events []coding.TaskEvent) bool {
 }
 
 func repairAttemptLimit(task coding.Task, events []coding.TaskEvent) int {
+	limit := maxRepairAttempts
 	if singleFileGeneratedArtifactTask(task) && artifactValidationFailureCount(events) > 0 {
-		return maxArtifactRepairAttempts
+		limit = maxArtifactRepairAttempts
 	}
-	return maxRepairAttempts
+	if latestReviewerNeedsDeterministicRepair(events) {
+		return limit + 1
+	}
+	return limit
+}
+
+func latestReviewerNeedsDeterministicRepair(events []coding.TaskEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != "reviewer_verdict" {
+			continue
+		}
+		verdict, ok := reviewVerdictFromEvent(events[i])
+		if !ok || verdict.Verdict != coding.ReviewNeedsFix {
+			return false
+		}
+		text := strings.ToLower(verdict.Summary + "\n" + strings.Join(verdict.Issues, "\n"))
+		for _, marker := range []string{
+			"syntax error",
+			"undefined name",
+			"missing import",
+			"not imported",
+			"typo",
+			"attributeerror",
+			"attribute error",
+			"has no attribute",
+			"typeerror",
+			"missing required positional",
+			"missing required argument",
+			"positional argument",
+		} {
+			if strings.Contains(text, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func retryableWorkerErrorTask(events []coding.TaskEvent) bool {
-	_, ok := latestWorkerError(events)
-	return ok
+	event, ok := latestWorkerErrorEvent(events)
+	if !ok {
+		return false
+	}
+	switch event.Type {
+	case "worker_rejected":
+		return workerRejectionRetryable(events)
+	case "artifact_validation":
+		return artifactValidationFailureCount(events) < maxArtifactRepairAttempts && repairEffectiveness(events)
+	default:
+		return workerErrorFailureCount(events, event.Type) < maxWorkerPatchDiffRepairAttempts
+	}
+}
+
+func (m model) retryableWorkerErrorTask(task coding.Task, events []coding.TaskEvent) bool {
+	if retryableWorkerErrorTask(events) {
+		return true
+	}
+	event, ok := latestWorkerErrorEvent(events)
+	if !ok {
+		return false
+	}
+	message := nonRetryableWorkerErrorMessage(event, events)
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  task.ID,
+		Type:    "repair_limit",
+		Message: message,
+	})
+	return false
+}
+
+func nonRetryableWorkerErrorMessage(event coding.TaskEvent, events []coding.TaskEvent) string {
+	switch event.Type {
+	case "worker_rejected":
+		fingerprints := workerRejectionFingerprints(events)
+		if len(fingerprints) >= 2 && fingerprints[len(fingerprints)-1] != "" && fingerprints[len(fingerprints)-1] == fingerprints[len(fingerprints)-2] {
+			return "Repair limit reached: repeated worker rejection with the same returned/allowed path mismatch or contract failure."
+		}
+		return "Repair limit reached: worker patch rejection retry budget exhausted."
+	case "artifact_validation":
+		return "Repair limit reached: deterministic artifact validation did not converge."
+	default:
+		return "Repair limit reached: worker error retry budget exhausted."
+	}
 }
 
 func artifactValidationFailureCount(events []coding.TaskEvent) int {
@@ -248,15 +331,136 @@ func artifactValidationFailureCount(events []coding.TaskEvent) int {
 }
 
 func latestWorkerError(events []coding.TaskEvent) (string, bool) {
+	event, ok := latestWorkerErrorEvent(events)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(event.Message), true
+}
+
+func latestWorkerErrorEvent(events []coding.TaskEvent) (coding.TaskEvent, bool) {
 	for i := len(events) - 1; i >= 0; i-- {
 		switch events[i].Type {
 		case "worker_error", "worker_timeout", "worker_json_error", "worker_rejected", "artifact_validation":
-			return strings.TrimSpace(events[i].Message), true
+			return events[i], true
 		case "worker_model", "worker_patch", "worker_blocker", "repair_start", "repair_limit", "reviewer_verdict":
-			return "", false
+			return coding.TaskEvent{}, false
 		}
 	}
-	return "", false
+	return coding.TaskEvent{}, false
+}
+
+func workerRejectionRetryable(events []coding.TaskEvent) bool {
+	fingerprints := workerRejectionFingerprints(events)
+	if len(fingerprints) == 0 {
+		return false
+	}
+	// Check for repeated identical rejections
+	if len(fingerprints) >= maxWorkerPatchDiffRepairAttempts {
+		last := fingerprints[len(fingerprints)-1]
+		prev := fingerprints[len(fingerprints)-2]
+		if last != "" && last == prev {
+			// Repeated identical rejection detected - not retryable
+			// The caller should record a repair_limit event
+			return false
+		}
+	}
+	// Cap total rejection retries
+	if len(fingerprints) >= maxArtifactRepairAttempts {
+		// Hit max retries - not retryable
+		// The caller should record a repair_limit event
+		return false
+	}
+	return true
+}
+
+func workerRejectionFingerprints(events []coding.TaskEvent) []string {
+	var out []string
+	for _, event := range events {
+		if event.Type != "worker_rejected" {
+			continue
+		}
+		out = append(out, workerRejectionFingerprint(event))
+	}
+	return out
+}
+
+func workerRejectionFingerprint(event coding.TaskEvent) string {
+	if len(event.Payload) > 0 {
+		var payload struct {
+			Paths        []string `json:"paths"`
+			AllowedPaths []string `json:"allowed_paths"`
+			Error        string   `json:"error"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err == nil {
+			parts := append([]string{}, payload.Paths...)
+			parts = append(parts, payload.AllowedPaths...)
+			parts = append(parts, payload.Error)
+			return normalizedEventFingerprint(strings.Join(parts, "\n"))
+		}
+	}
+	return normalizedEventFingerprint(event.Message)
+}
+
+func workerErrorFailureCount(events []coding.TaskEvent, eventType string) int {
+	count := 0
+	for _, event := range events {
+		if event.Type == eventType {
+			count++
+		}
+	}
+	return count
+}
+
+func repairEffectiveness(events []coding.TaskEvent) bool {
+	fingerprints := artifactValidationFingerprints(events)
+	if len(fingerprints) < 2 {
+		return true
+	}
+	last := fingerprints[len(fingerprints)-1]
+	prev := fingerprints[len(fingerprints)-2]
+	return last != "" && last != prev
+}
+
+func artifactValidationFingerprints(events []coding.TaskEvent) []string {
+	var out []string
+	for _, event := range events {
+		if event.Type != "artifact_validation" {
+			continue
+		}
+		out = append(out, artifactValidationFingerprint(event.Message))
+	}
+	return out
+}
+
+func artifactValidationFingerprint(message string) string {
+	return normalizedEventFingerprint(strings.Join(filteredArtifactValidationLines(message), "\n"))
+}
+
+func filteredArtifactValidationLines(message string) []string {
+	lines := strings.Split(message, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "artifact validation failed") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+func normalizedEventFingerprint(message string) string {
+	lines := strings.Split(message, "\n")
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+		if line == "" {
+			continue
+		}
+		normalized = append(normalized, strings.ToLower(line))
+	}
+	return strings.Join(normalized, "\n")
 }
 
 func latestArtifactValidation(events []coding.TaskEvent) (string, bool) {
@@ -269,6 +473,53 @@ func latestArtifactValidation(events []coding.TaskEvent) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func latestArtifactValidationPaths(events []coding.TaskEvent) []string {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "artifact_validation":
+			var payload struct {
+				Issues []struct {
+					Path string `json:"path"`
+				} `json:"issues"`
+			}
+			if len(events[i].Payload) == 0 || json.Unmarshal(events[i].Payload, &payload) != nil {
+				return nil
+			}
+			var paths []string
+			seen := map[string]bool{}
+			for _, issue := range payload.Issues {
+				path := filepath.ToSlash(filepath.Clean(strings.TrimSpace(issue.Path)))
+				if path == "." || path == "" || seen[path] {
+					continue
+				}
+				seen[path] = true
+				paths = append(paths, path)
+			}
+			return paths
+		case "worker_patch", "worker_blocker", "repair_limit":
+			return nil
+		}
+	}
+	return nil
+}
+
+func pathsIntersect(a, b []string) bool {
+	seen := map[string]bool{}
+	for _, path := range a {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+		if clean != "." && clean != "" {
+			seen[clean] = true
+		}
+	}
+	for _, path := range b {
+		clean := filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))
+		if seen[clean] {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyWorkerRunError(err error) (eventType, status, note string) {

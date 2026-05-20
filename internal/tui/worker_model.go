@@ -16,6 +16,11 @@ import (
 
 var modelSizePattern = regexp.MustCompile(`(?i)(?:^|[^0-9])([0-9]+(?:\.[0-9]+)?)\s*b(?:[^a-z]|$)`)
 
+const (
+	minWorkerOutputKillChars = 32768
+	maxWorkerOutputKillChars = 196608
+)
+
 func (m model) runWorkerModelCmd(ctx context.Context, runID int, packet coding.TaskPacket) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
@@ -70,6 +75,97 @@ func (m model) workerRequestTimeout() time.Duration {
 		seconds = 300
 	}
 	return time.Duration(seconds) * time.Second
+}
+
+func (m model) workerOutputGuard(maxTokens int) llm.OutputGuard {
+	limit := maxTokens * 8
+	if limit < minWorkerOutputKillChars {
+		limit = minWorkerOutputKillChars
+	}
+	if limit > maxWorkerOutputKillChars {
+		limit = maxWorkerOutputKillChars
+	}
+	return func(content string) error {
+		if len(content) > limit {
+			return fmt.Errorf("worker output killed: response exceeded %d characters before producing a valid bounded patch", limit)
+		}
+		if repeated, count := runawayRepeatedSuffix(content); repeated != "" {
+			return fmt.Errorf("worker output killed: repeated output block detected %d times; regenerate a compact complete patch instead of repeating content", count)
+		}
+		return nil
+	}
+}
+
+func runawayRepeatedSuffix(content string) (string, int) {
+	if len(content) < 800 {
+		return "", 0
+	}
+	if line, count := repeatedMeaningfulLine(content); count >= 8 {
+		return line, count
+	}
+	window := content
+	if len(window) > 24000 {
+		window = window[len(window)-24000:]
+	}
+	for blockLen := 200; blockLen <= 2000; blockLen += 100 {
+		count := repeatedSuffixCount(window, blockLen)
+		if count >= 4 {
+			block := window[len(window)-blockLen:]
+			if meaningfulRepeatedBlock(block) {
+				return block, count
+			}
+		}
+	}
+	return "", 0
+}
+
+func repeatedMeaningfulLine(content string) (string, int) {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 240 {
+		lines = lines[len(lines)-240:]
+	}
+	counts := map[string]int{}
+	for _, line := range lines {
+		line = strings.Join(strings.Fields(strings.TrimSpace(line)), " ")
+		if len(line) < 24 {
+			continue
+		}
+		counts[line]++
+		if counts[line] >= 8 {
+			return line, counts[line]
+		}
+	}
+	return "", 0
+}
+
+func repeatedSuffixCount(content string, blockLen int) int {
+	if blockLen <= 0 || len(content) < blockLen*2 {
+		return 0
+	}
+	block := content[len(content)-blockLen:]
+	count := 1
+	for offset := len(content) - blockLen*2; offset >= 0; offset -= blockLen {
+		if content[offset:offset+blockLen] != block {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func meaningfulRepeatedBlock(block string) bool {
+	trimmed := strings.TrimSpace(block)
+	if len(trimmed) < 80 {
+		return false
+	}
+	lines := strings.Split(trimmed, "\n")
+	nonEmpty := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			nonEmpty++
+		}
+	}
+	return nonEmpty >= 3
 }
 
 type workerCapacityProfile struct {

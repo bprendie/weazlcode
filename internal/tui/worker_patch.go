@@ -2,8 +2,12 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,7 +19,7 @@ import (
 const (
 	maxWorkerPatchDiffRepairAttempts       = 2
 	maxLocalArtifactValidationRepairPasses = 2
-	maxDeterministicArtifactRepairPasses   = 4
+	maxDeterministicArtifactRepairPasses   = 2
 )
 
 func (m model) importWorkerPatch(raw string) (tea.Model, tea.Cmd, bool) {
@@ -73,6 +77,28 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Payload: payload,
 		})
 	}
+	events, _ := m.store.TaskEvents(task.ID)
+	if repairCycleActive(events) && detectIdenticalRepair(patch, events) {
+		if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+			m.addSystemNote("Worker patch error: " + err.Error())
+			m.status = "worker patch failed"
+			return m, nil, true
+		}
+		message := "Worker patch rejected: identical repair detected. Worker generated the same code changes as a previous attempt without making progress."
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "worker_rejected",
+			Message: message,
+		})
+		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+			TaskID:  task.ID,
+			Type:    "repair_limit",
+			Message: message,
+		})
+		m.addSystemNote(message)
+		m.status = "identical repair detected"
+		return m, m.notificationCmd("worker_rejected", task.Title, message), true
+	}
 	if blocker := workerBlockerText(patch.Blocker); blocker != "" {
 		events, _ := m.store.TaskEvents(task.ID)
 		if err := m.restoreTaskBaseline(task, events, "worker blocker"); err != nil {
@@ -101,6 +127,32 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		paths = coding.WorkerFileEditPaths(patch.Files)
 	}
 	allowedPaths := taskAllowedPaths(task)
+	if err := coding.ValidatePatchPaths(paths, allowedPaths, task.ForbiddenPaths); err != nil {
+		originalPaths := append([]string{}, paths...)
+		if corrected, ok := m.tryAutoCorrectPathMismatch(task, patch, paths, allowedPaths); ok {
+			correctedPaths := workerPatchPaths(corrected)
+			if validateErr := coding.ValidatePatchPaths(correctedPaths, allowedPaths, task.ForbiddenPaths); validateErr == nil {
+				patch = corrected
+				paths = correctedPaths
+				payload, _ := json.Marshal(struct {
+					OriginalPaths  []string `json:"original_paths"`
+					CorrectedPaths []string `json:"corrected_paths"`
+				}{
+					OriginalPaths:  originalPaths,
+					CorrectedPaths: correctedPaths,
+				})
+				_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+					TaskID:  task.ID,
+					Type:    "worker_path_corrected",
+					Message: fmt.Sprintf("Auto-corrected worker path from %q to %q.", strings.Join(originalPaths, ", "), strings.Join(correctedPaths, ", ")),
+					Payload: payload,
+				})
+				m.addSystemNote(fmt.Sprintf("Auto-corrected worker path from %q to %q.", strings.Join(originalPaths, ", "), strings.Join(correctedPaths, ", ")))
+			} else {
+				err = validateErr
+			}
+		}
+	}
 	if err := coding.ValidatePatchPaths(paths, allowedPaths, task.ForbiddenPaths); err != nil {
 		message := formatWorkerPathRejection(paths, allowedPaths, task.ForbiddenPaths, err)
 		payload, _ := json.Marshal(struct {
@@ -135,6 +187,34 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		m.addSystemNote(message)
 		m.status = "worker patch rejected"
 		return m, nil, true
+	}
+	if repairCycleActive(events) {
+		if validationPaths := latestArtifactValidationPaths(events); len(validationPaths) > 0 && !pathsIntersect(paths, validationPaths) {
+			message := fmt.Sprintf("Worker patch rejected: artifact validation failed in %s, but this repair touched %s. Repair the files named by validation first.", strings.Join(validationPaths, ", "), strings.Join(paths, ", "))
+			payload, _ := json.Marshal(struct {
+				Paths           []string `json:"paths"`
+				ValidationPaths []string `json:"validation_paths"`
+			}{Paths: paths, ValidationPaths: validationPaths})
+			_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+				TaskID:  task.ID,
+				Type:    "worker_rejected",
+				Message: message,
+				Payload: payload,
+			})
+			if err := m.store.UpdateTaskStatus(task.ID, coding.TaskStatusBlocked); err != nil {
+				m.addSystemNote("Worker patch error: " + err.Error())
+				m.status = "worker patch failed"
+				return m, nil, true
+			}
+			m.writeRunArtifact("worker_rejected", struct {
+				TaskID          string   `json:"task_id"`
+				Paths           []string `json:"paths"`
+				ValidationPaths []string `json:"validation_paths"`
+			}{TaskID: task.ID, Paths: paths, ValidationPaths: validationPaths})
+			m.addSystemNote(message)
+			m.status = "worker patch rejected"
+			return m, nil, true
+		}
 	}
 	if rewrites := m.suspiciousWorkerRewrites(task, patch.Files); len(rewrites) > 0 {
 		message := formatSuspiciousRewriteRejection(rewrites)
@@ -184,6 +264,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		m.status = "worker patch rejected"
 		return m, nil, true
 	}
+	m.recordWorkerPatchAttempt(task.ID, patch)
 	result, err := applyWorkerPatchContent(m.project.Root, patch)
 	if err != nil {
 		applyErrors = append(applyErrors, err)
@@ -271,7 +352,7 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 		Result coding.PatchApplyResult `json:"result"`
 		Paths  []string                `json:"paths"`
 	}{TaskID: task.ID, Patch: patch, Result: result, Paths: result.Paths})
-	if diff, err := m.gitDiff(); err == nil {
+	if diff, err := m.taskGitDiff(task); err == nil {
 		m.writeRunArtifact("diff", struct {
 			TaskID string `json:"task_id"`
 			Diff   string `json:"diff"`
@@ -392,6 +473,180 @@ func workerBlockerText(blocker string) string {
 	}
 }
 
+func hashWorkerPatch(patch coding.WorkerPatch) string {
+	h := sha256.New()
+	h.Write([]byte(patch.Patch))
+	for _, file := range patch.Files {
+		h.Write([]byte{0})
+		h.Write([]byte(file.Path))
+		h.Write([]byte{0})
+		h.Write([]byte(file.Content))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func repairCycleActive(events []coding.TaskEvent) bool {
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "repair_start", "repair_requested", "artifact_validation":
+			return true
+		case "approval", "worker_start":
+			return false
+		}
+	}
+	return false
+}
+
+func detectIdenticalRepair(currentPatch coding.WorkerPatch, events []coding.TaskEvent) bool {
+	currentHash := hashWorkerPatch(currentPatch)
+	if currentHash == "" {
+		return false
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		switch events[i].Type {
+		case "worker_patch_attempt":
+			if workerPatchAttemptHash(events[i]) == currentHash {
+				return true
+			}
+		case "approval", "worker_start":
+			return false
+		}
+	}
+	return false
+}
+
+func workerPatchAttemptHash(event coding.TaskEvent) string {
+	if len(event.Payload) == 0 {
+		return ""
+	}
+	var payload struct {
+		Hash string `json:"hash"`
+	}
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.Hash)
+}
+
+func (m model) recordWorkerPatchAttempt(taskID string, patch coding.WorkerPatch) {
+	payload, _ := json.Marshal(struct {
+		Hash    string `json:"hash"`
+		Summary string `json:"summary,omitempty"`
+	}{
+		Hash:    hashWorkerPatch(patch),
+		Summary: strings.TrimSpace(patch.Summary),
+	})
+	_, _ = m.store.AddTaskEvent(coding.TaskEvent{
+		TaskID:  taskID,
+		Type:    "worker_patch_attempt",
+		Message: "Worker patch attempt fingerprint recorded.",
+		Payload: payload,
+	})
+}
+
+func workerPatchPaths(patch coding.WorkerPatch) []string {
+	if len(patch.Files) > 0 {
+		return coding.WorkerFileEditPaths(patch.Files)
+	}
+	return coding.PatchPaths(patch.Patch)
+}
+
+func (m model) tryAutoCorrectPathMismatch(task coding.Task, patch coding.WorkerPatch, returnedPaths, allowedPaths []string) (coding.WorkerPatch, bool) {
+	if len(returnedPaths) != 1 || len(allowedPaths) != 1 {
+		return coding.WorkerPatch{}, false
+	}
+	if !singleFileGeneratedArtifactTask(task) && !generatedCodeArtifactTask(task) {
+		return coding.WorkerPatch{}, false
+	}
+	returnedPath := strings.TrimSpace(filepath.ToSlash(returnedPaths[0]))
+	allowedPath := strings.TrimSpace(filepath.ToSlash(allowedPaths[0]))
+	if returnedPath == "" || allowedPath == "" || filepath.Ext(returnedPath) != filepath.Ext(allowedPath) {
+		return coding.WorkerPatch{}, false
+	}
+	returnedBase := strings.TrimSuffix(filepath.Base(returnedPath), filepath.Ext(returnedPath))
+	allowedBase := strings.TrimSuffix(filepath.Base(allowedPath), filepath.Ext(allowedPath))
+	if !pathsSimilar(returnedBase, allowedBase) {
+		return coding.WorkerPatch{}, false
+	}
+	fullAllowedPath := filepath.Join(m.project.Root, filepath.FromSlash(allowedPath))
+	if info, err := os.Stat(fullAllowedPath); err == nil && info.Size() > 0 {
+		events, _ := m.store.TaskEvents(task.ID)
+		if !repairCycleActive(events) {
+			return coding.WorkerPatch{}, false
+		}
+	}
+
+	corrected := patch
+	if len(patch.Files) > 0 {
+		corrected.Files = make([]coding.WorkerFileEdit, len(patch.Files))
+		for i, file := range patch.Files {
+			corrected.Files[i] = file
+			if filepath.ToSlash(strings.TrimSpace(file.Path)) == returnedPath {
+				corrected.Files[i].Path = allowedPath
+			}
+		}
+		return corrected, true
+	}
+	if strings.TrimSpace(patch.Patch) != "" {
+		corrected.Patch = strings.ReplaceAll(patch.Patch, returnedPath, allowedPath)
+		corrected.Patch = strings.ReplaceAll(corrected.Patch, "a/"+returnedPath, "a/"+allowedPath)
+		corrected.Patch = strings.ReplaceAll(corrected.Patch, "b/"+returnedPath, "b/"+allowedPath)
+		return corrected, true
+	}
+	return coding.WorkerPatch{}, false
+}
+
+func pathsSimilar(a, b string) bool {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b || a+"s" == b || a == b+"s" {
+		return true
+	}
+	return levenshteinDistance(a, b) <= 2
+}
+
+func levenshteinDistance(a, b string) int {
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			curr[j] = minInt(prev[j]+1, curr[j-1]+1, prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(b)]
+}
+
+func minInt(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
+}
+
 func applyWorkerPatchContent(projectRoot string, patch coding.WorkerPatch) (coding.PatchApplyResult, error) {
 	if len(patch.Files) > 0 {
 		return coding.ApplyFileEdits(projectRoot, patch.Files)
@@ -423,12 +678,15 @@ func (m model) blockTaskAfterWorkerApplyFailure(task coding.Task, message string
 
 func (m model) generateWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket) (string, llm.Usage, error) {
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	return client.CompleteWithUsage(ctx, workerPatchMessages(packet), m.workerOutputTokens(packet))
+	maxTokens := m.workerOutputTokens(packet)
+	return client.CompleteWithUsageGuard(ctx, workerPatchMessages(packet), maxTokens, m.workerOutputGuard(maxTokens))
 }
 
 func (m model) repairWorkerPatchJSON(ctx context.Context, packet coding.TaskPacket, raw string, parseErr error) (string, error) {
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	return client.Complete(ctx, workerPatchRepairMessages(packet, raw, parseErr), m.workerOutputTokens(packet))
+	maxTokens := m.workerOutputTokens(packet)
+	content, _, err := client.CompleteWithUsageGuard(ctx, workerPatchRepairMessages(packet, raw, parseErr), maxTokens, m.workerOutputGuard(maxTokens))
+	return content, err
 }
 
 func (m model) workerPatchFromGeneratedJSON(ctx context.Context, packet coding.TaskPacket, raw string) (coding.WorkerPatch, int, error) {
@@ -454,7 +712,8 @@ func (m model) repairWorkerPatchDiff(ctx context.Context, task coding.Task, patc
 		return coding.WorkerPatch{}, err
 	}
 	client := llm.New(m.cfg.ProviderForRole("worker"))
-	raw, err := client.Complete(ctx, workerPatchDiffRepairMessages(packet, patch, applyErr), m.workerOutputTokens(packet))
+	maxTokens := m.workerOutputTokens(packet)
+	raw, _, err := client.CompleteWithUsageGuard(ctx, workerPatchDiffRepairMessages(packet, patch, applyErr), maxTokens, m.workerOutputGuard(maxTokens))
 	if err != nil {
 		return coding.WorkerPatch{}, err
 	}
@@ -495,6 +754,7 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
 				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty. Do not produce unified diffs for standalone generated outputs.",
 				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"Do not repeat code blocks or state-reset assignments. Each method body should contain each logical statement once unless repetition is explicitly required by the task. If you catch yourself repeating the same block, stop and return a blocker instead of continuing.",
 				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
 				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
 				"For existing files, prefer a focused unified diff in patch and leave files empty.",
@@ -541,6 +801,7 @@ func workerPatchDiffRepairMessages(packet coding.TaskPacket, patch coding.Worker
 				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
 				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty. Do not repair or return a unified diff.",
 				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"Do not repeat code blocks or state-reset assignments. Each method body should contain each logical statement once unless repetition is explicitly required by the task. If you catch yourself repeating the same block, stop and return a blocker instead of continuing.",
 				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
 				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
 				"For existing files, prefer a corrected unified diff in patch and leave files empty.",
@@ -580,6 +841,7 @@ func workerPatchRepairMessages(packet coding.TaskPacket, raw string, parseErr er
 				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
 				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty, especially during repair.",
 				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"Do not repeat code blocks or state-reset assignments. Each method body should contain each logical statement once unless repetition is explicitly required by the task. If you catch yourself repeating the same block, stop and return a blocker instead of continuing.",
 				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
 				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
 				"For existing files, prefer a focused unified diff in patch and leave files empty.",

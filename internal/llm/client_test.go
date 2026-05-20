@@ -122,6 +122,47 @@ func TestCompleteWithUsageOpenAICompat(t *testing.T) {
 	}
 }
 
+func TestCompleteWithUsageGuardOpenAICompatStopsStreaming(t *testing.T) {
+	var sawStream bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req["stream"] != true {
+			t.Fatalf("stream = %#v, want true", req["stream"])
+		}
+		sawStream = true
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"abc\"}}]}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"def\"}}]}\n\n"))
+	}))
+	defer server.Close()
+
+	client := New(config.Provider{Type: "vllm", Model: "test-model", ServerURL: server.URL})
+	content, _, err := client.CompleteWithUsageGuard(context.Background(), []ChatMessage{{Role: "user", Content: "hello"}}, 64, func(content string) error {
+		if len(content) >= 3 {
+			return context.Canceled
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("CompleteWithUsageGuard returned nil error, want guard error")
+	}
+	if content != "abc" {
+		t.Fatalf("content = %q, want partial abc", content)
+	}
+	if !sawStream {
+		t.Fatal("server did not receive streaming request")
+	}
+}
+
 func TestCompleteWithUsageOllama(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/chat" {

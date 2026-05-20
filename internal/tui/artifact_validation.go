@@ -194,6 +194,34 @@ for module, name in from_imports:
     suffix = f"; did you mean {suggestion[0]}?" if suggestion else ""
     module_issues.append(f"from {module} import {name} references missing local export {name}{suffix}")
 
+class ModuleStoreVisitor(ast.NodeVisitor):
+    def __init__(self):
+        self.names = set()
+
+    def visit_FunctionDef(self, node):
+        self.names.add(node.name)
+        return
+
+    def visit_AsyncFunctionDef(self, node):
+        self.names.add(node.name)
+        return
+
+    def visit_ClassDef(self, node):
+        self.names.add(node.name)
+        return
+
+    def visit_Lambda(self, node):
+        return
+
+    def visit_Name(self, node):
+        if isinstance(node.ctx, ast.Store):
+            self.names.add(node.id)
+
+module_stores = ModuleStoreVisitor()
+for node in tree.body:
+    module_stores.visit(node)
+module_names |= module_stores.names
+
 class ModuleLoadVisitor(ast.NodeVisitor):
     def __init__(self):
         self.names = []
@@ -319,34 +347,61 @@ class IssueVisitor(ast.NodeVisitor):
         self._check_unstable_branch_locals(node)
 
     def _check_unstable_branch_locals(self, node):
-        def walk_block(body, unstable):
+        def walk_block(body, unstable, stable=None):
             unstable = dict(unstable)
+            stable = set(stable or set())
             for stmt in body:
-                loaded = load_names(stmt)
-                assigned_here = assignment_names_in_stmt(stmt)
-                for name, source in sorted(unstable.items()):
-                    if name in loaded and name not in assigned_here:
-                        self.issues.append(f"function {node.name} references {source}-scoped local {name} after the block where it may not be defined; initialize {name} before the block or keep its use inside that block")
                 if isinstance(stmt, (ast.For, ast.AsyncFor)):
-                    for name in assigned_target_names(stmt.target):
-                        unstable[name] = "loop"
-                    walk_block(stmt.body, unstable)
-                    walk_block(stmt.orelse, unstable)
+                    loop_targets = assigned_target_names(stmt.target)
+                    loaded = load_names(stmt.iter)
+                    for name, source in sorted(unstable.items()):
+                        if name in loaded:
+                            self.issues.append(f"function {node.name} references {source}-scoped local {name} after the block where it may not be defined; initialize {name} before the block or keep its use inside that block")
+                    body_unstable = dict(unstable)
+                    for name in loop_targets:
+                        body_unstable.pop(name, None)
+                    walk_block(stmt.body, body_unstable, stable | loop_targets)
+                    for name in loop_targets:
+                        if name not in stable:
+                            unstable[name] = "loop"
+                    walk_block(stmt.orelse, unstable, stable)
                 elif isinstance(stmt, ast.If):
+                    loaded = load_names(stmt.test)
+                    for name, source in sorted(unstable.items()):
+                        if name in loaded:
+                            self.issues.append(f"function {node.name} references {source}-scoped local {name} after the block where it may not be defined; initialize {name} before the block or keep its use inside that block")
+                    walk_block(stmt.body, unstable, stable)
+                    walk_block(stmt.orelse, unstable, stable)
                     body_assigned = assigned_names_in_block(stmt.body)
                     else_assigned = assigned_names_in_block(stmt.orelse)
                     branch_only = (body_assigned | else_assigned) - (body_assigned & else_assigned)
                     for name in branch_only:
-                        unstable[name] = "conditional"
-                    walk_block(stmt.body, unstable)
-                    walk_block(stmt.orelse, unstable)
+                        if name not in stable:
+                            unstable[name] = "conditional"
+                    for name in body_assigned & else_assigned:
+                        unstable.pop(name, None)
+                        stable.add(name)
                 elif isinstance(stmt, (ast.While, ast.With, ast.Try)):
+                    loaded = load_names(getattr(stmt, "test", stmt))
+                    assigned_here = assignment_names_in_stmt(stmt)
+                    for name, source in sorted(unstable.items()):
+                        if name in loaded and name not in assigned_here:
+                            self.issues.append(f"function {node.name} references {source}-scoped local {name} after the block where it may not be defined; initialize {name} before the block or keep its use inside that block")
                     for child_body_name in ("body", "orelse", "finalbody"):
                         child_body = getattr(stmt, child_body_name, None)
                         if child_body:
-                            walk_block(child_body, unstable)
+                            walk_block(child_body, unstable, stable)
                     for handler in getattr(stmt, "handlers", []):
-                        walk_block(handler.body, unstable)
+                        walk_block(handler.body, unstable, stable)
+                else:
+                    loaded = load_names(stmt)
+                    assigned_here = assignment_names_in_stmt(stmt)
+                    for name, source in sorted(unstable.items()):
+                        if name in loaded and name not in assigned_here:
+                            self.issues.append(f"function {node.name} references {source}-scoped local {name} after the block where it may not be defined; initialize {name} before the block or keep its use inside that block")
+                    for name in assigned_here:
+                        unstable.pop(name, None)
+                        stable.add(name)
         walk_block(node.body, {})
 
 visitor = IssueVisitor()

@@ -206,7 +206,7 @@ func TestSlashReviewApproveMarksTaskDone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 6 || events[5].Type != "reviewer_verdict" {
+	if len(events) != 7 || events[6].Type != "reviewer_verdict" {
 		t.Fatalf("events = %#v", events)
 	}
 }
@@ -356,7 +356,7 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 7 || events[6].Type != "repair_requested" {
+	if len(events) != 8 || events[7].Type != "repair_requested" {
 		t.Fatalf("events = %#v", events)
 	}
 	updated, _, handled = m.handleSlashCommand("/run-task")
@@ -378,11 +378,11 @@ func TestSlashReviewNeedsFixCreatesRepairPacket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskEvents: %v", err)
 	}
-	if len(events) != 9 || events[7].Type != "task_baseline" || events[8].Type != "repair_start" {
+	if len(events) != 10 || events[8].Type != "task_baseline" || events[9].Type != "repair_start" {
 		t.Fatalf("events = %#v", events)
 	}
-	if !strings.Contains(string(events[8].Payload), "Repair focus") || !strings.Contains(string(events[8].Payload), "Use the requested wording only") {
-		t.Fatalf("repair payload = %s", events[8].Payload)
+	if !strings.Contains(string(events[9].Payload), "Repair focus") || !strings.Contains(string(events[9].Payload), "Use the requested wording only") {
+		t.Fatalf("repair payload = %s", events[9].Payload)
 	}
 	kinds := runArtifactKinds(t, filepath.Join(got.project.StateDir, "runs", got.session.ID))
 	for _, want := range []string{"repair_request", "repair_packet"} {
