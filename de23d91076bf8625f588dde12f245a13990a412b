@@ -1,0 +1,16 @@
+{"id":"1c9a7592-7d08-44b1-9944-899bbdf05696","ts":"2026-05-20T17:31:00.288Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"2b2c6e6f-6595-48d7-a741-d5920a21021b","ts":"2026-05-20T17:31:09.448Z","path":"/home/bobp/Code/weazlcode/internal/tui/review_commands.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"1dec0c3b-976e-4adc-8897-bcfe22ff5cb5","ts":"2026-05-20T17:31:22.905Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"9eacbb0f-46b7-4a5d-a915-8bf37f67e7f4","ts":"2026-05-20T17:31:30.998Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"c1222f3a-3633-4f6a-8ee6-808664e2aa4f","ts":"2026-05-20T17:31:48.959Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"e4fc893e-f3c1-4ed9-a498-e3ce1facd30b","ts":"2026-05-20T17:32:00.781Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_scheduler.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"cf71c27d-8f54-48c1-b423-709b52145d3d","ts":"2026-05-20T17:32:07.829Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_scheduler.go","version":"1.0.0","taskID":"2b489fb6-ad4f-4693-a253-87655933d82e"}
+{"id":"fefa122e-c6cd-4bfc-84eb-09ad823b6cc3","ts":"2026-05-20T18:22:53.655Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_packet.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"4107d1aa-0f6c-4b2c-b0b6-66d63de93b2a","ts":"2026-05-20T18:23:07.581Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_packet.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"7c411d47-db14-465e-99fe-b0dc75261af4","ts":"2026-05-20T18:25:32.956Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"e73b5e89-c59d-4353-b16f-3bae7ac008c0","ts":"2026-05-20T18:25:53.482Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"b914f4cc-594f-4332-ac6b-436b9e8d3a15","ts":"2026-05-20T18:26:03.222Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_scheduler.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"fbf470c8-8c8f-43a6-bb29-a1d4d2d4b638","ts":"2026-05-20T18:26:12.272Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_scheduler.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"413c3353-5814-4098-a21c-129b3553545f","ts":"2026-05-20T18:26:37.922Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"897ca5df-1c04-48e2-8236-6b9da2b10cf9","ts":"2026-05-20T18:26:58.407Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_packet.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
+{"id":"764689ce-c396-4464-bc91-7a5e9e1a21d6","ts":"2026-05-20T18:27:37.638Z","path":"/home/bobp/Code/weazlcode/internal/tui/worker_patch.go","version":"1.0.0","taskID":"a779755a-fd63-48c4-9bd6-ce604d2bdb02"}
