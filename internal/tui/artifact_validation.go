@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -63,6 +64,9 @@ func (m model) validatePythonTaskOutputs(task coding.Task) []artifactValidationI
 		for _, message := range runPythonStaticValidator(fullPath) {
 			issues = append(issues, artifactValidationIssue{Path: path, Message: message})
 		}
+		for _, message := range runPythonInterfaceContractProbe(m.project.Root, path, task.InterfaceContract) {
+			issues = append(issues, artifactValidationIssue{Path: path, Message: message})
+		}
 	}
 	return issues
 }
@@ -88,6 +92,272 @@ func runPythonStaticValidator(path string) []string {
 	}
 	return issues
 }
+
+func runPythonInterfaceContractProbe(root, path string, contract coding.InterfaceContract) []string {
+	if coding.InterfaceContractEmpty(contract) {
+		return nil
+	}
+	payload, err := json.Marshal(contract)
+	if err != nil {
+		return []string{"Python interface contract probe failed: " + err.Error()}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "python3", "-c", pythonInterfaceContractProbeScript, root, path, string(payload))
+	out, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(out))
+	if ctx.Err() != nil {
+		return []string{"Python interface contract probe timed out"}
+	}
+	if err != nil && text == "" {
+		return []string{"Python interface contract probe failed: " + err.Error()}
+	}
+	var issues []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			issues = append(issues, line)
+		}
+	}
+	return issues
+}
+
+const pythonInterfaceContractProbeScript = `
+import importlib
+import importlib.util
+import inspect
+import json
+import os
+import re
+import sys
+import types
+
+root, path, raw_contract = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    contract = json.loads(raw_contract)
+except Exception as exc:
+    print(f"interface contract JSON could not be parsed: {exc}")
+    raise SystemExit(0)
+
+module_name = path[:-3].replace(os.sep, ".").replace("/", ".") if path.endswith(".py") else ""
+module_name = module_name[:-9] if module_name.endswith(".__init__") else module_name
+if not module_name:
+    raise SystemExit(0)
+
+sys.path.insert(0, root)
+
+def install_pygame_stub_if_needed():
+    if importlib.util.find_spec("pygame") is not None:
+        return
+    class Dummy:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __call__(self, *args, **kwargs):
+            return Dummy()
+        def __getattr__(self, name):
+            return Dummy()
+        def __iter__(self):
+            return iter(())
+        def __bool__(self):
+            return False
+        def __float__(self):
+            return 0.0
+        def __int__(self):
+            return 0
+        def __add__(self, other):
+            return Dummy()
+        def __radd__(self, other):
+            return Dummy()
+        def __sub__(self, other):
+            return Dummy()
+        def __rsub__(self, other):
+            return Dummy()
+        def __mul__(self, other):
+            return Dummy()
+        def __rmul__(self, other):
+            return Dummy()
+        def __truediv__(self, other):
+            return Dummy()
+        def __rtruediv__(self, other):
+            return Dummy()
+        def __lt__(self, other):
+            return False
+        def __le__(self, other):
+            return False
+        def __gt__(self, other):
+            return False
+        def __ge__(self, other):
+            return False
+        def colliderect(self, *args, **kwargs):
+            return False
+        def get_width(self):
+            return 800
+        def get_height(self):
+            return 600
+    class Clock(Dummy):
+        def tick(self, *args, **kwargs):
+            return 16
+    class Rect(Dummy):
+        def __init__(self, x=0, y=0, width=0, height=0):
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+    pygame = types.ModuleType("pygame")
+    pygame.Rect = Rect
+    pygame.Surface = Dummy
+    pygame.Color = Dummy
+    pygame.QUIT = 256
+    pygame.KEYDOWN = 768
+    pygame.K_SPACE = 32
+    pygame.K_ESCAPE = 27
+    pygame.K_r = 114
+    pygame.K_RETURN = 13
+    pygame.draw = Dummy()
+    pygame.display = Dummy()
+    pygame.font = Dummy()
+    pygame.event = Dummy()
+    pygame.time = Dummy()
+    pygame.time.Clock = Clock
+    pygame.transform = Dummy()
+    pygame.math = Dummy()
+    pygame.init = lambda *args, **kwargs: None
+    pygame.quit = lambda *args, **kwargs: None
+    pygame.__getattr__ = lambda name: Dummy()
+    sys.modules["pygame"] = pygame
+    sys.modules["pygame.locals"] = pygame
+
+install_pygame_stub_if_needed()
+
+try:
+    module = importlib.import_module(module_name)
+except Exception as exc:
+    print(f"interface contract import failed for {module_name}: {type(exc).__name__}: {exc}")
+    raise SystemExit(0)
+
+issues = []
+
+def contract_values(key):
+    value = contract.get(key) or []
+    if isinstance(value, str):
+        value = [value]
+    return [str(item).strip() for item in value if str(item).strip()]
+
+def clean_export_name(text):
+    text = text.strip()
+    text = re.sub(r"[\(\[].*$", "", text).strip()
+    if "." in text:
+        text = text.split(".")[-1]
+    match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)", text)
+    return match.group(1) if match else ""
+
+exports = [clean_export_name(item) for item in contract_values("exports")]
+exports = [item for item in exports if item]
+for name in exports:
+    if not hasattr(module, name):
+        issues.append(f"interface contract export missing: {name}")
+
+def parse_signature_spec(spec):
+    spec = spec.strip()
+    if not spec:
+        return "", []
+    spec = spec.split("->", 1)[0].strip()
+    match = re.search(r"([A-Za-z_][A-Za-z0-9_\.]*)\s*\(([^)]*)\)", spec)
+    if not match:
+        return "", []
+    target = match.group(1)
+    params = []
+    for raw in match.group(2).split(","):
+        raw = raw.strip()
+        if not raw or raw in {"self", "cls"}:
+            continue
+        raw = raw.split("=", 1)[0].split(":", 1)[0].strip()
+        raw = raw.lstrip("*")
+        if raw:
+            params.append(raw)
+    return target, params
+
+def public_signature_params(obj):
+    try:
+        sig = inspect.signature(obj)
+    except Exception as exc:
+        return None, str(exc)
+    params = []
+    for param in sig.parameters.values():
+        if param.name in {"self", "cls"}:
+            continue
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            continue
+        params.append(param.name)
+    return params, ""
+
+def check_signature(label, obj, expected):
+    actual, err = public_signature_params(obj)
+    if actual is None:
+        issues.append(f"interface contract signature unavailable for {label}: {err}")
+        return
+    missing = [name for name in expected if name not in actual]
+    if missing:
+        issues.append(f"interface contract signature mismatch for {label}: missing parameter(s) {', '.join(missing)}; actual parameters: {', '.join(actual) or '(none)'}")
+        return
+    if len(actual) > len(expected):
+        extra = actual[len(expected):]
+        issues.append(f"interface contract signature mismatch for {label}: unexpected extra parameter(s) {', '.join(extra)}; expected parameters: {', '.join(expected) or '(none)'}")
+
+for spec in contract_values("constructors"):
+    target, expected = parse_signature_spec(spec)
+    name = clean_export_name(target)
+    if not name:
+        continue
+    obj = getattr(module, name, None)
+    if obj is None:
+        issues.append(f"interface contract constructor target missing: {name}")
+        continue
+    check_signature(name, obj, expected)
+
+def candidate_classes():
+    classes = []
+    for name in exports:
+        obj = getattr(module, name, None)
+        if inspect.isclass(obj):
+            classes.append((name, obj))
+    if not classes:
+        for name, obj in inspect.getmembers(module, inspect.isclass):
+            if getattr(obj, "__module__", "") == module.__name__:
+                classes.append((name, obj))
+    return classes
+
+classes = candidate_classes()
+for spec in contract_values("methods"):
+    target, expected = parse_signature_spec(spec)
+    if not target:
+        continue
+    if "." in target:
+        class_name, method_name = target.rsplit(".", 1)
+        cls = getattr(module, class_name, None)
+        if cls is None:
+            issues.append(f"interface contract method class missing: {class_name}")
+            continue
+        obj = getattr(cls, method_name, None)
+        if obj is None:
+            issues.append(f"interface contract method missing: {class_name}.{method_name}")
+            continue
+        check_signature(f"{class_name}.{method_name}", obj, expected)
+        continue
+    obj = getattr(module, target, None)
+    if obj is not None and callable(obj):
+        check_signature(target, obj, expected)
+        continue
+    matches = [(class_name, getattr(cls, target)) for class_name, cls in classes if hasattr(cls, target)]
+    if not matches:
+        issues.append(f"interface contract method/function missing: {target}")
+        continue
+    for class_name, obj in matches:
+        check_signature(f"{class_name}.{target}", obj, expected)
+
+for issue in issues[:20]:
+    print(issue)
+`
 
 const pythonStaticValidatorScript = `
 import ast
@@ -248,19 +518,65 @@ def assigned_target_names(target):
     return names
 
 def load_names(node):
-    names = set()
-    for child in ast.walk(node):
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-            continue
-        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
-            names.add(child.id)
-    return names
+    class LoadNameVisitor(ast.NodeVisitor):
+        def __init__(self):
+            self.names = set()
+            self.ignored = [set()]
+
+        def visit_FunctionDef(self, node):
+            return
+
+        def visit_AsyncFunctionDef(self, node):
+            return
+
+        def visit_ClassDef(self, node):
+            return
+
+        def visit_Lambda(self, node):
+            return
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Load) and not any(node.id in ignored for ignored in self.ignored):
+                self.names.add(node.id)
+
+        def _visit_comprehension(self, node, value_nodes):
+            comp_names = set()
+            for gen in node.generators:
+                self.visit(gen.iter)
+                comp_names |= assigned_target_names(gen.target)
+                self.ignored.append(set(comp_names))
+                for condition in gen.ifs:
+                    self.visit(condition)
+                self.ignored.pop()
+            self.ignored.append(comp_names)
+            for value_node in value_nodes:
+                self.visit(value_node)
+            self.ignored.pop()
+
+        def visit_ListComp(self, node):
+            self._visit_comprehension(node, [node.elt])
+
+        def visit_SetComp(self, node):
+            self._visit_comprehension(node, [node.elt])
+
+        def visit_GeneratorExp(self, node):
+            self._visit_comprehension(node, [node.elt])
+
+        def visit_DictComp(self, node):
+            self._visit_comprehension(node, [node.key, node.value])
+
+    visitor = LoadNameVisitor()
+    visitor.visit(node)
+    return visitor.names
 
 def assignment_names_in_stmt(stmt):
     names = set()
     for child in ast.walk(stmt):
         if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
             names.add(child.id)
+        elif isinstance(child, (ast.Import, ast.ImportFrom)):
+            for alias in child.names:
+                names.add(alias.asname or alias.name.split(".")[0])
     return names
 
 def assigned_names_in_block(body):
@@ -344,7 +660,59 @@ class IssueVisitor(ast.NodeVisitor):
                 self.issues.append(f"function {node.name} references undefined name {name}; for pygame UI rectangles shared across methods, define self.{name} before event handling and reference self.{name} instead of a local {name}")
             else:
                 self.issues.append(f"function {node.name} references undefined name {name}")
+        self._check_local_use_before_assignment(node, locals_)
         self._check_unstable_branch_locals(node)
+
+    def _check_local_use_before_assignment(self, node, locals_):
+        initialized = set()
+        reported = set()
+        for arg in list(node.args.posonlyargs) + list(node.args.args) + list(node.args.kwonlyargs):
+            initialized.add(arg.arg)
+        if node.args.vararg:
+            initialized.add(node.args.vararg.arg)
+        if node.args.kwarg:
+            initialized.add(node.args.kwarg.arg)
+
+        def augmented_target_loads(stmt):
+            if isinstance(stmt, ast.AugAssign):
+                return assigned_target_names(stmt.target)
+            return set()
+
+        def check_loaded(stmt, available):
+            loaded = load_names(stmt) | augmented_target_loads(stmt)
+            for name in sorted(loaded):
+                if name in locals_ and name not in available and name not in reported:
+                    reported.add(name)
+                    self.issues.append(f"function {node.name} reads local name {name} before assigning it in all control paths; initialize {name} before first use or keep state inside an object")
+
+        def walk_statements(statements, available):
+            available = set(available)
+            for stmt in statements:
+                if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    available.add(stmt.name)
+                    continue
+                if isinstance(stmt, (ast.For, ast.AsyncFor)):
+                    check_loaded(stmt.iter, available)
+                    loop_available = set(available) | assigned_target_names(stmt.target)
+                    walk_statements(stmt.body, loop_available)
+                    walk_statements(stmt.orelse, available)
+                    continue
+                if isinstance(stmt, ast.If):
+                    check_loaded(stmt.test, available)
+                    body_available = walk_statements(stmt.body, set(available))
+                    else_available = walk_statements(stmt.orelse, set(available))
+                    available |= body_available & else_available
+                    continue
+                if isinstance(stmt, ast.While):
+                    check_loaded(stmt.test, available)
+                    walk_statements(stmt.body, set(available))
+                    walk_statements(stmt.orelse, set(available))
+                    continue
+                check_loaded(stmt, available)
+                available |= assignment_names_in_stmt(stmt)
+            return available
+
+        walk_statements(node.body, initialized)
 
     def _check_unstable_branch_locals(self, node):
         def walk_block(body, unstable, stable=None):

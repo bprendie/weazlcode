@@ -395,7 +395,7 @@ func TestWorkerPatchMessages(t *testing.T) {
 		t.Fatalf("messages = %#v", messages)
 	}
 	combined := messages[0].Content + "\n" + messages[1].Content
-	for _, want := range []string{"Return only valid JSON", "WorkerPatch", "files", "unified diff", "For existing files", "preserve all unrelated content", "Follow the task packet artifact contract exactly", "HTML fragments must not include doctype/html/head/body", "preserve their exact copy", "Do not shorten user-provided copy with ellipses", "replace them with real task output", "diff marker residue", "Never replace real existing file content with placeholders", "explicit imports between local modules", "Do not use wildcard imports", `"task_id": "task-1"`, "README.md"} {
+	for _, want := range []string{"Return only valid JSON", "WeazlCode BRAID worker contract", "touch the file named by the latest failure first", "WorkerPatch", "files", "unified diff", "For existing files", "preserve all unrelated content", "Follow the task packet artifact contract exactly", "HTML fragments must not include doctype/html/head/body", "preserve their exact copy", "Do not shorten user-provided copy with ellipses", "replace them with real task output", "diff marker residue", "Never replace real existing file content with placeholders", "explicit imports between local modules", "Do not use wildcard imports", `"task_id": "task-1"`, "README.md"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("worker messages missing %q:\n%s", want, combined)
 		}
@@ -477,7 +477,7 @@ func TestBuildWorkerPacketIncludesDoneDependencyOutputsAsContext(t *testing.T) {
 		Status:      coding.PlanStatusApproved,
 		Tasks: []coding.Task{
 			{ID: "hero", PlanID: "plan-1", Title: "Hero", Goal: "Create hero fragment without doctype, html, head, or body.", Status: coding.TaskStatusDone, AllowedPaths: []string{"sections/hero.html"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "hero exists"}}},
-			{ID: "base-css", PlanID: "plan-1", Title: "Base CSS", Goal: "Create base CSS.", Status: coding.TaskStatusDone, AllowedPaths: []string{"styles/base.css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "css exists"}}},
+			{ID: "base-css", PlanID: "plan-1", Title: "Base CSS", Goal: "Create base CSS.", Status: coding.TaskStatusDone, InterfaceContract: coding.InterfaceContract{Summary: "Exports base stylesheet variables.", Exports: []string{":root variables"}}, AllowedPaths: []string{"styles/base.css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "css exists"}}},
 			{ID: "assemble", PlanID: "plan-1", Title: "Assemble page", Goal: "Assemble final page from dependency outputs.", Status: coding.TaskStatusPending, AllowedPaths: []string{"index.html"}, DependsOn: []string{"hero", "base-css"}, AcceptanceChecks: []coding.AcceptanceCheck{{Description: "index includes dependency outputs"}}},
 		},
 	}
@@ -500,6 +500,19 @@ func TestBuildWorkerPacketIncludesDoneDependencyOutputsAsContext(t *testing.T) {
 	}
 	if _, ok := contextByPath["index.html"]; ok {
 		t.Fatalf("missing create target should not be included as context: %#v", packet.ContextFiles)
+	}
+	if len(packet.DependencyContracts) != 2 {
+		t.Fatalf("dependency contracts = %#v", packet.DependencyContracts)
+	}
+	contractsByID := map[string]coding.InterfaceContract{}
+	for _, contract := range packet.DependencyContracts {
+		contractsByID[contract.TaskID] = contract.InterfaceContract
+	}
+	if !strings.Contains(contractsByID["hero"].Summary, "Create hero fragment") {
+		t.Fatalf("derived hero contract = %#v", contractsByID["hero"])
+	}
+	if contractsByID["base-css"].Summary != "Exports base stylesheet variables." {
+		t.Fatalf("base css contract = %#v", contractsByID["base-css"])
 	}
 }
 
@@ -1408,6 +1421,30 @@ func TestRepairEffectivenessUsesValidationFingerprints(t *testing.T) {
 	}
 }
 
+func TestDeterministicReviewerRepairDetectsPythonLocalAssignment(t *testing.T) {
+	verdict := coding.ReviewVerdict{
+		Verdict: coding.ReviewNeedsFix,
+		Summary: "bird_flapped is still read before assignment in main(), causing an UnboundLocalError at runtime.",
+	}
+	payload, err := json.Marshal(verdict)
+	if err != nil {
+		t.Fatalf("Marshal verdict: %v", err)
+	}
+	events := []coding.TaskEvent{{Type: "reviewer_verdict", Payload: payload}}
+	if !latestReviewerNeedsDeterministicRepair(events) {
+		t.Fatalf("latestReviewerNeedsDeterministicRepair = false, want true")
+	}
+}
+
+func TestPythonStateRepairGuidanceOnlyForLocalAssignmentFailures(t *testing.T) {
+	if got := pythonStateRepairGuidance("function main reads local name score before assigning it"); !strings.Contains(got, "Initialize that state inside the function") {
+		t.Fatalf("guidance = %q", got)
+	}
+	if got := pythonStateRepairGuidance("make the bird more colorful"); got != "" {
+		t.Fatalf("guidance = %q, want empty", got)
+	}
+}
+
 func TestArtifactValidationChecksSourceCopyAndAssets(t *testing.T) {
 	m := commandTestModel(t)
 	root := t.TempDir()
@@ -1511,6 +1548,97 @@ def draw():
 	joined := strings.Join(messages, "\n")
 	if !strings.Contains(joined, "wildcard import from config cannot be statically validated") || !strings.Contains(joined, "replace it with explicit imported names") {
 		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestArtifactValidationChecksPythonInterfaceContract(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `class Bird:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+
+    def flap(self, force):
+        pass
+
+def draw_background(surface, width, height):
+    pass
+`
+	if err := os.WriteFile(filepath.Join(root, "renderer.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile renderer: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build renderer module",
+		Goal:         "Create Python renderer module.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"renderer.py"},
+		InterfaceContract: coding.InterfaceContract{
+			Exports:      []string{"Bird", "MissingExport"},
+			Constructors: []string{"Bird(x: int, y: int)"},
+			Methods:      []string{"flap() -> None", "draw_background(surface) -> None"},
+		},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	for _, want := range []string{
+		"interface contract export missing: MissingExport",
+		"interface contract signature mismatch for Bird: unexpected extra parameter(s) color",
+		"interface contract signature mismatch for Bird.flap: unexpected extra parameter(s) force",
+		"interface contract signature mismatch for draw_background: unexpected extra parameter(s) width, height",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("issues missing %q: %#v", want, issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsMatchingPythonInterfaceContract(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `import pygame
+
+class Bird:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+    def flap(self):
+        pass
+
+def draw_background(surface):
+    pygame.draw.circle(surface, (255, 255, 0), (10, 10), 5)
+    pass
+`
+	if err := os.WriteFile(filepath.Join(root, "renderer.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile renderer: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build renderer module",
+		Goal:         "Create Python renderer module.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"renderer.py"},
+		InterfaceContract: coding.InterfaceContract{
+			Exports:      []string{"Bird", "draw_background"},
+			Constructors: []string{"Bird(x: int, y: int)"},
+			Methods:      []string{"flap() -> None", "draw_background(surface) -> None"},
+		},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "interface contract") {
+			t.Fatalf("unexpected interface issue: %#v", issues)
+		}
 	}
 }
 
@@ -1920,6 +2048,73 @@ func TestArtifactValidationAllowsPreviouslyInitializedLocalsAssignedInBranches(t
 	for _, issue := range issues {
 		if strings.Contains(issue.Message, "conditional-scoped local score") || strings.Contains(issue.Message, "conditional-scoped local game_over") {
 			t.Fatalf("unexpected conditional-scoped issue: %#v", issues)
+		}
+	}
+}
+
+func TestArtifactValidationChecksPythonLocalUseBeforeAssignment(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `score = 0
+pipe_group = []
+
+def main():
+    print(score)
+    score += 1
+    print(pipe_group)
+    pipe_group = [pipe for pipe in pipe_group if pipe]
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame entrypoint",
+		Goal:         "Create a Python game entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	messages := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		messages = append(messages, issue.Message)
+	}
+	joined := strings.Join(messages, "\n")
+	for _, want := range []string{"reads local name pipe_group before assigning", "reads local name score before assigning"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("issues missing %q: %#v", want, issues)
+		}
+	}
+}
+
+func TestArtifactValidationAllowsInitializedPythonLocals(t *testing.T) {
+	m := commandTestModel(t)
+	root := t.TempDir()
+	m.project.Root = root
+	source := `def main():
+    score = 0
+    pipe_group = []
+    print(score, pipe_group)
+    score += 1
+    pipe_group = [pipe for pipe in pipe_group if pipe]
+`
+	if err := os.WriteFile(filepath.Join(root, "main.py"), []byte(source), 0o644); err != nil {
+		t.Fatalf("WriteFile main: %v", err)
+	}
+	task := coding.Task{
+		ID:           "python",
+		PlanID:       "plan",
+		Title:        "Build pygame entrypoint",
+		Goal:         "Create a Python game entrypoint.",
+		Status:       coding.TaskStatusRunning,
+		AllowedPaths: []string{"main.py"},
+	}
+	issues := m.validateArtifactTaskOutput(task)
+	for _, issue := range issues {
+		if strings.Contains(issue.Message, "reads local name") {
+			t.Fatalf("unexpected local assignment issue: %#v", issues)
 		}
 	}
 }

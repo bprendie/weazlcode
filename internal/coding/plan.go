@@ -38,20 +38,31 @@ type Plan struct {
 }
 
 type Task struct {
-	ID               string            `json:"id"`
-	PlanID           string            `json:"plan_id"`
-	Title            string            `json:"title"`
-	Goal             string            `json:"goal"`
-	Status           string            `json:"status"`
-	AllowedPaths     []string          `json:"allowed_paths,omitempty"`
-	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
-	ContextFiles     []string          `json:"context_files,omitempty"`
-	Skills           []string          `json:"skills,omitempty"`
-	DependsOn        []string          `json:"depends_on,omitempty"`
-	Verification     []string          `json:"verification,omitempty"`
-	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID                string            `json:"id"`
+	PlanID            string            `json:"plan_id"`
+	Title             string            `json:"title"`
+	Goal              string            `json:"goal"`
+	Status            string            `json:"status"`
+	InterfaceContract InterfaceContract `json:"interface_contract,omitempty"`
+	AllowedPaths      []string          `json:"allowed_paths,omitempty"`
+	ForbiddenPaths    []string          `json:"forbidden_paths,omitempty"`
+	ContextFiles      []string          `json:"context_files,omitempty"`
+	Skills            []string          `json:"skills,omitempty"`
+	DependsOn         []string          `json:"depends_on,omitempty"`
+	Verification      []string          `json:"verification,omitempty"`
+	AcceptanceChecks  []AcceptanceCheck `json:"acceptance_checks,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+type InterfaceContract struct {
+	Summary      string   `json:"summary,omitempty"`
+	Exports      []string `json:"exports,omitempty"`
+	Imports      []string `json:"imports,omitempty"`
+	Constructors []string `json:"constructors,omitempty"`
+	Methods      []string `json:"methods,omitempty"`
+	Attributes   []string `json:"attributes,omitempty"`
+	Commands     []string `json:"commands,omitempty"`
 }
 
 type AcceptanceCheck struct {

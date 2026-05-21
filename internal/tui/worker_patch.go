@@ -90,11 +90,6 @@ func (m model) applyWorkerPatchWithRepair(patch coding.WorkerPatch, repairInvali
 			Type:    "worker_rejected",
 			Message: message,
 		})
-		_, _ = m.store.AddTaskEvent(coding.TaskEvent{
-			TaskID:  task.ID,
-			Type:    "repair_limit",
-			Message: message,
-		})
 		m.addSystemNote(message)
 		m.status = "identical repair detected"
 		return m, m.notificationCmd("worker_rejected", task.Title, message), true
@@ -746,6 +741,7 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 			Role: "system",
 			Content: strings.Join([]string{
 				"You are the WeazlCode local worker.",
+				strings.Join(workerBraidContract(), "\n"),
 				profile,
 				"Return a WorkerPatch JSON object.",
 				"Return only valid JSON. Do not wrap it in markdown fences.",
@@ -754,6 +750,7 @@ func workerPatchMessages(packet coding.TaskPacket) []llm.ChatMessage {
 				"For cohesive whole-file artifact tasks, prefer files with complete content for every allowed output file. Use patch only for small edits to existing files. When using files, set patch to an empty string.",
 				"For single-file generated artifact tasks, files[] with complete content for the one allowed file is required and patch must be empty. Do not produce unified diffs for standalone generated outputs.",
 				"Maintainability matters: keep generated code modular and readable. Prefer files around 300 lines or less. If a requested implementation will be much larger and the task allows multiple files, split responsibilities across the allowed files. If the task only allows one file and the result would be oversized, return a blocker asking for the task to be split unless the task explicitly requires one file.",
+				"Treat interface_contract and dependency_contracts in the task packet as binding API specs. Implement your own interface_contract exactly, and when importing dependency modules, use the dependency_contracts instead of inventing constructor arguments, methods, attributes, or import paths.",
 				"Do not repeat code blocks or state-reset assignments. Each method body should contain each logical statement once unless repetition is explicitly required by the task. If you catch yourself repeating the same block, stop and return a blocker instead of continuing.",
 				"For generated module code, use explicit imports between local modules. Do not use wildcard imports such as from module import *; they hide interfaces from static validation and downstream workers.",
 				"Every file edit must be an object inside the files array: {\"path\":\"relative/path\",\"content\":\"full file content\"}. Do not put path/content pairs outside an object.",
@@ -795,6 +792,7 @@ func workerPatchDiffRepairMessages(packet coding.TaskPacket, patch coding.Worker
 			Role: "system",
 			Content: strings.Join([]string{
 				"You repair invalid unified diffs for WeazlCode WorkerPatch JSON.",
+				strings.Join(workerDiffRepairBraidContract(), "\n"),
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
 				"Keep the same task_id.",
@@ -835,6 +833,7 @@ func workerPatchRepairMessages(packet coding.TaskPacket, raw string, parseErr er
 			Role: "system",
 			Content: strings.Join([]string{
 				"You repair WeazlCode WorkerPatch JSON.",
+				strings.Join(workerBraidContract(), "\n"),
 				"Return only valid JSON. Do not wrap it in markdown fences.",
 				"Use this exact shape: {\"task_id\":\"...\",\"summary\":\"...\",\"patch\":\"...\",\"files\":[{\"path\":\"...\",\"content\":\"...\"}],\"blocker\":\"...\"}.",
 				"Use the task_id from the task packet.",

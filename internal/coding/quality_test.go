@@ -248,9 +248,58 @@ func TestRepairPlanQualityAddsInteractiveCoordinatorDependencies(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"src/bird.py", "src/pipes.py"} {
-		if !stringSliceContains(state.AllowedPaths, want) {
-			t.Fatalf("state allowed_paths = %#v, missing %q", state.AllowedPaths, want)
+		if stringSliceContains(state.AllowedPaths, want) {
+			t.Fatalf("state allowed_paths = %#v, should not edit dependency %q", state.AllowedPaths, want)
 		}
+		if !stringSliceContains(state.ContextFiles, want) {
+			t.Fatalf("state context_files = %#v, missing %q", state.ContextFiles, want)
+		}
+	}
+}
+
+func TestRepairPlanQualityLeavesIntermediateDependenciesReadOnly(t *testing.T) {
+	plan := Plan{Tasks: []Task{
+		{ID: "bird", Title: "Bird entity", Goal: "Create pygame bird entity.", AllowedPaths: []string{"entities/bird.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "bird exists"}}},
+		{ID: "pipe", Title: "Pipe entity", Goal: "Create pygame pipe entity.", AllowedPaths: []string{"entities/pipe.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "pipe exists"}}},
+		{ID: "state", Title: "Game state", Goal: "Create game state with collision and score handling for bird and pipes.", AllowedPaths: []string{"game/state.py", "entities/bird.py", "entities/pipe.py"}, ContextFiles: []string{"entities/bird.py", "entities/pipe.py"}, DependsOn: []string{"bird", "pipe"}, AcceptanceChecks: []AcceptanceCheck{{Description: "state exists"}}},
+		{ID: "main", Title: "Main entrypoint", Goal: "Create main.py entrypoint with smoke mode.", AllowedPaths: []string{"main.py", "entities/bird.py", "entities/pipe.py"}, ContextFiles: []string{"entities/bird.py", "entities/pipe.py", "game/state.py"}, DependsOn: []string{"bird", "pipe", "state"}, AcceptanceChecks: []AcceptanceCheck{{Description: "main smoke exists"}}},
+		{ID: "integrate", Title: "Integration wiring and smoke test verification", Goal: "Verify all modules integrate correctly and run smoke test.", AllowedPaths: []string{"main.py", "entities/bird.py", "entities/pipe.py", "game/state.py"}, DependsOn: []string{"main"}, AcceptanceChecks: []AcceptanceCheck{{Description: "smoke works"}}},
+	}}
+
+	repaired := RepairPlanQuality(plan)
+	if issues := ValidatePlanQuality(repaired); len(issues) != 0 {
+		t.Fatalf("issues = %#v, want none", issues)
+	}
+	state := repaired.Tasks[2]
+	for _, path := range []string{"entities/bird.py", "entities/pipe.py"} {
+		if stringSliceContains(state.AllowedPaths, path) {
+			t.Fatalf("state allowed_paths = %#v, should not include dependency %q", state.AllowedPaths, path)
+		}
+	}
+	main := repaired.Tasks[3]
+	for _, path := range []string{"entities/bird.py", "entities/pipe.py"} {
+		if stringSliceContains(main.AllowedPaths, path) {
+			t.Fatalf("main allowed_paths = %#v, should not include dependency %q before final integration", main.AllowedPaths, path)
+		}
+	}
+}
+
+func TestRepairPlanQualityAddsDerivedInterfaceContracts(t *testing.T) {
+	plan := Plan{Tasks: []Task{{
+		ID:           "bird",
+		Title:        "Bird entity",
+		Goal:         "Create Bird class with flap and update methods.",
+		AllowedPaths: []string{"entities/bird.py"},
+		AcceptanceChecks: []AcceptanceCheck{
+			{Description: "Bird(x: int, y: int) constructor exists"},
+			{Description: "flap() and update(dt: float) exist"},
+		},
+	}}}
+
+	repaired := RepairPlanQuality(plan)
+	contract := repaired.Tasks[0].InterfaceContract
+	if !strings.Contains(contract.Summary, "Create Bird class") || !stringSliceContains(contract.Methods, "flap() and update(dt: float) exist") {
+		t.Fatalf("contract = %#v", contract)
 	}
 }
 
@@ -288,7 +337,45 @@ func TestRepairPlanQualityAddsIntegrationSurfaces(t *testing.T) {
 	}
 }
 
-func TestValidatePlanQualityFlagsDependentCodeTaskWithoutModuleSurfaces(t *testing.T) {
+func TestValidatePlanQualityFlagsAllowedForbiddenConflict(t *testing.T) {
+	plan := Plan{Tasks: []Task{{
+		ID:               "main",
+		Title:            "Main entrypoint",
+		Goal:             "Wire generated modules.",
+		AllowedPaths:     []string{"main.py", "bird.py"},
+		ForbiddenPaths:   []string{"bird.py"},
+		AcceptanceChecks: []AcceptanceCheck{{Description: "main works"}},
+	}}}
+
+	issues := ValidatePlanQuality(plan)
+	if !qualityIssuesContain(issues, "allowed_paths and forbidden_paths conflict") {
+		t.Fatalf("issues = %#v, want allowed/forbidden conflict", issues)
+	}
+}
+
+func TestRepairPlanQualityRemovesAllowedForbiddenConflict(t *testing.T) {
+	plan := Plan{Tasks: []Task{{
+		ID:               "main",
+		Title:            "Main entrypoint",
+		Goal:             "Wire generated modules.",
+		AllowedPaths:     []string{"main.py", "bird.py"},
+		ForbiddenPaths:   []string{"bird.py", "secrets.py"},
+		AcceptanceChecks: []AcceptanceCheck{{Description: "main works"}},
+	}}}
+
+	repaired := RepairPlanQuality(plan)
+	if issues := ValidatePlanQuality(repaired); len(issues) != 0 {
+		t.Fatalf("issues = %#v, want none", issues)
+	}
+	if stringSliceContains(repaired.Tasks[0].ForbiddenPaths, "bird.py") {
+		t.Fatalf("forbidden paths still include allowed path: %#v", repaired.Tasks[0].ForbiddenPaths)
+	}
+	if !stringSliceContains(repaired.Tasks[0].ForbiddenPaths, "secrets.py") {
+		t.Fatalf("unrelated forbidden path was not preserved: %#v", repaired.Tasks[0].ForbiddenPaths)
+	}
+}
+
+func TestValidatePlanQualityFlagsDependentCodeTaskWithoutModuleContext(t *testing.T) {
 	plan := Plan{Tasks: []Task{
 		{ID: "bird", Title: "Bird", Goal: "Create bird module.", AllowedPaths: []string{"bird.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "bird module exists"}}},
 		{ID: "pipe", Title: "Pipe", Goal: "Create pipe module.", AllowedPaths: []string{"pipe.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "pipe module exists"}}},
@@ -296,16 +383,16 @@ func TestValidatePlanQualityFlagsDependentCodeTaskWithoutModuleSurfaces(t *testi
 	}}
 
 	issues := ValidatePlanQuality(plan)
-	if !qualityIssuesContain(issues, "dependent code task composes multiple module drafts") {
-		t.Fatalf("issues = %#v, want dependent code task scope issue", issues)
+	if !qualityIssuesContain(issues, "lacks their context") {
+		t.Fatalf("issues = %#v, want dependent code task context issue", issues)
 	}
 }
 
-func TestValidatePlanQualityAllowsDependentCodeTaskWithModuleSurfaces(t *testing.T) {
+func TestValidatePlanQualityAllowsDependentCodeTaskWithModuleContext(t *testing.T) {
 	plan := Plan{Tasks: []Task{
 		{ID: "bird", Title: "Bird", Goal: "Create bird module.", AllowedPaths: []string{"bird.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "bird module exists"}}},
 		{ID: "pipe", Title: "Pipe", Goal: "Create pipe module.", AllowedPaths: []string{"pipe.py"}, AcceptanceChecks: []AcceptanceCheck{{Description: "pipe module exists"}}},
-		{ID: "state", Title: "Game state", Goal: "Create game state module that composes Bird and Pipe for collisions and scoring.", AllowedPaths: []string{"game_state.py", "bird.py", "pipe.py"}, DependsOn: []string{"bird", "pipe"}, AcceptanceChecks: []AcceptanceCheck{{Description: "game state module exists"}}},
+		{ID: "state", Title: "Game state", Goal: "Create game state module that composes Bird and Pipe for collisions and scoring.", AllowedPaths: []string{"game_state.py"}, ContextFiles: []string{"bird.py", "pipe.py"}, DependsOn: []string{"bird", "pipe"}, AcceptanceChecks: []AcceptanceCheck{{Description: "game state module exists"}}},
 	}}
 
 	if issues := ValidatePlanQuality(plan); len(issues) != 0 {

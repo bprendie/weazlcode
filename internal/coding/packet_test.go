@@ -20,6 +20,10 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 		Title:        "Task",
 		Goal:         "Edit file",
 		Status:       TaskStatusPending,
+		InterfaceContract: InterfaceContract{
+			Summary: "Edit internal/file.go.",
+			Exports: []string{"Run"},
+		},
 		AllowedPaths: []string{"internal"},
 		ContextFiles: []string{"internal/file.go"},
 	}
@@ -48,6 +52,9 @@ func TestBuildTaskPacketPacksContext(t *testing.T) {
 	}
 	if len(packet.Skills) != 1 || packet.Skills[0].Name != "go-tests" {
 		t.Fatalf("skills = %#v", packet.Skills)
+	}
+	if packet.InterfaceContract.Summary != "Edit internal/file.go." || len(packet.InterfaceContract.Exports) != 1 {
+		t.Fatalf("interface contract = %#v", packet.InterfaceContract)
 	}
 }
 

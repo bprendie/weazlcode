@@ -22,11 +22,16 @@ func TestPlanRoundTrip(t *testing.T) {
 		Status:      coding.PlanStatusDraft,
 		Tasks: []coding.Task{
 			{
-				ID:             "task-1",
-				PlanID:         "plan-1",
-				Title:          "Add storage",
-				Goal:           "Persist plans and tasks",
-				Status:         coding.TaskStatusPending,
+				ID:     "task-1",
+				PlanID: "plan-1",
+				Title:  "Add storage",
+				Goal:   "Persist plans and tasks",
+				Status: coding.TaskStatusPending,
+				InterfaceContract: coding.InterfaceContract{
+					Summary: "Storage task API",
+					Exports: []string{"Store"},
+					Methods: []string{"SavePlan(plan coding.Plan) error"},
+				},
 				AllowedPaths:   []string{"internal/storage"},
 				ContextFiles:   []string{"internal/storage/storage.go"},
 				Skills:         []string{"go-tests"},
@@ -61,6 +66,9 @@ func TestPlanRoundTrip(t *testing.T) {
 	}
 	if len(got.Tasks[0].DependsOn) != 1 || got.Tasks[0].DependsOn[0] != "task-0" {
 		t.Fatalf("depends_on = %#v", got.Tasks[0].DependsOn)
+	}
+	if got.Tasks[0].InterfaceContract.Summary != "Storage task API" || len(got.Tasks[0].InterfaceContract.Methods) != 1 {
+		t.Fatalf("interface contract = %#v", got.Tasks[0].InterfaceContract)
 	}
 }
 

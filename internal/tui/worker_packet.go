@@ -35,6 +35,7 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 	if err != nil {
 		return coding.TaskPacket{}, err
 	}
+	packet.DependencyContracts = m.dependencyContracts(task)
 	profile := m.workerCapacityProfile()
 	artifactInstruction := workerArtifactInstruction(task)
 	packet.WorkerProfile = profile.Label + ": " + strings.TrimSpace(strings.Join(nonEmptyWorkerInstructions(profile.Instruction, artifactInstruction), "\n"))
@@ -45,6 +46,38 @@ func (m model) buildWorkerPacket(task coding.Task) (coding.TaskPacket, error) {
 		packet.ContextPolicy.Instruction += " " + artifactInstruction
 	}
 	return packet, nil
+}
+
+func (m model) dependencyContracts(task coding.Task) []coding.DependencyContract {
+	if m.store == nil || len(task.DependsOn) == 0 {
+		return nil
+	}
+	plan, ok, err := m.store.LatestPlan(m.session.ID)
+	if err != nil || !ok {
+		return nil
+	}
+	byID := map[string]coding.Task{}
+	for _, candidate := range plan.Tasks {
+		byID[candidate.ID] = candidate
+	}
+	out := make([]coding.DependencyContract, 0, len(task.DependsOn))
+	for _, depID := range task.DependsOn {
+		dep, ok := byID[strings.TrimSpace(depID)]
+		if !ok {
+			continue
+		}
+		contract := dep.InterfaceContract
+		if coding.InterfaceContractEmpty(contract) {
+			contract = coding.DerivedInterfaceContract(dep)
+		}
+		out = append(out, coding.DependencyContract{
+			TaskID:            dep.ID,
+			Title:             dep.Title,
+			AllowedPaths:      dep.AllowedPaths,
+			InterfaceContract: contract,
+		})
+	}
+	return out
 }
 
 func nonEmptyWorkerInstructions(values ...string) []string {
@@ -463,13 +496,13 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 			if singleFileGeneratedArtifactTask(task) {
 				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current file, but deterministic artifact validation failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Fix exactly these validator issues:\n" + validation + validationPathGuidance)
 			} else {
-				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current files, but deterministic artifact validation failed. Repair the current generated files in place. If a named file is syntactically broken, truncated, or internally inconsistent, return complete replacement content for that named file. Fix exactly these validator issues, preserve correct existing content, and do not regenerate unrelated sections:\n" + validation + validationPathGuidance)
+				packet.Goal = strings.TrimSpace(packet.Goal + "\n\nArtifact validation repair focus:\nThe previous worker output was applied to the current files, but deterministic artifact validation failed. Repair the current generated files in place. If a named file is syntactically broken, truncated, or internally inconsistent, return complete replacement content for that named file. Fix exactly these validator issues, preserve correct existing content, and do not regenerate unrelated sections:\n" + validation + validationPathGuidance + pythonStateRepairGuidance(validation))
 			}
 			packet.AcceptanceChecks = append(packet.AcceptanceChecks, artifactValidationRepairCheck())
 			return packet, nil
 		}
 		if workerErr, retry := latestWorkerError(events); retry {
-			packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRetry note:\nPrevious worker attempt failed before producing a patch: " + workerErr)
+			packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRetry note:\nPrevious worker attempt failed before producing a patch or was rejected before progress could be accepted: " + workerErr + "\nReturn a materially different patch that addresses the latest validation or reviewer issue.")
 			return packet, nil
 		}
 		return packet, nil
@@ -482,12 +515,35 @@ func (m model) buildWorkerPacketForRun(task coding.Task) (coding.TaskPacket, err
 				validation += "\nYou must edit the file(s) named by validation before touching lower-priority files: " + strings.Join(paths, ", ")
 			}
 		}
-		packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\nThe previous single-file artifact remains in the workspace, but deterministic validation has failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Address the reviewer issues and validation failure below:\n" + repair + validation)
+		packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\nThe previous single-file artifact remains in the workspace, but deterministic validation has failed. Return files[] with complete replacement content for the single allowed file and leave patch empty. If the current file is syntactically broken, truncated, or internally inconsistent, ignore the broken current content and reconstruct a clean complete file from the task requirements and available dependency context. Do not try fragile line edits against the broken output. Address the reviewer issues and validation failure below:\n" + repair + validation + latestWorkerRetryGuidance(events))
 	} else {
-		packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\nThe previous worker output remains applied in the current workspace and is included in context_files when it fits the context budget. Treat this as a surgical repair pass: fix the reviewer issues below, preserve unrelated working code and content, and do not restart from scratch unless the reviewer explicitly asks for a full rewrite. If the repair mentions a failing --smoke path or other deterministic validation failure, make the minimal main-guard/control-flow change needed for that check before touching lower-priority gameplay polish.\n" + repair)
+		validation := ""
+		if latest, ok := latestArtifactValidation(events); ok {
+			validation = "\n\nLatest artifact validation failure:\n" + latest
+		}
+		packet.Goal = strings.TrimSpace(packet.Goal + "\n\nRepair focus:\nThe previous worker output remains applied in the current workspace and is included in context_files when it fits the context budget. Treat this as a surgical repair pass: fix the reviewer issues below, preserve unrelated working code and content, and do not restart from scratch unless the reviewer explicitly asks for a full rewrite. If the repair mentions a failing --smoke path or other deterministic validation failure, make the minimal main-guard/control-flow change needed for that check before touching lower-priority gameplay polish.\n" + repair + validation + latestWorkerRetryGuidance(events) + pythonStateRepairGuidance(repair+"\n"+validation))
 	}
 	packet.AcceptanceChecks = append(packet.AcceptanceChecks, coding.AcceptanceCheck{Description: "Reviewer needs_fix issues are addressed without broadening the task scope."})
 	return packet, nil
+}
+
+func pythonStateRepairGuidance(text string) string {
+	lower := strings.ToLower(text)
+	if !strings.Contains(lower, "before assign") &&
+		!strings.Contains(lower, "reads local name") &&
+		!strings.Contains(lower, "local variable") &&
+		!strings.Contains(lower, "unboundlocalerror") {
+		return ""
+	}
+	return "\nPython state repair rule: when a function both reads and writes a name, Python treats that name as local. Initialize that state inside the function or move it onto an object before first read. Do not add a bare module-level global declaration, and use global only when an existing initialized module variable is truly shared."
+}
+
+func latestWorkerRetryGuidance(events []coding.TaskEvent) string {
+	workerErr, retry := latestWorkerError(events)
+	if !retry {
+		return ""
+	}
+	return "\n\nLatest worker rejection:\n" + workerErr + "\nReturn a materially different patch that addresses the latest validation or reviewer issue."
 }
 
 type pathRejectionInfo struct {

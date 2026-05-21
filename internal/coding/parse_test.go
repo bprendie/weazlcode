@@ -12,6 +12,18 @@ func TestParsePlanJSONRejectsUnknownFields(t *testing.T) {
 	}
 }
 
+func TestParsePlanJSONAllowsInterfaceContract(t *testing.T) {
+	raw := []byte(`{"id":"p","session_id":"s","title":"t","status":"draft","tasks":[{"id":"task-1","plan_id":"p","title":"Bird","goal":"Create bird","status":"pending","interface_contract":{"summary":"Bird module API","exports":["Bird"],"constructors":["Bird(x: int, y: int)"],"methods":["flap() -> None"]},"allowed_paths":["bird.py"],"acceptance_checks":[{"description":"bird exists"}]}]}`)
+	plan, err := ParsePlanJSON(raw)
+	if err != nil {
+		t.Fatalf("ParsePlanJSON: %v", err)
+	}
+	contract := plan.Tasks[0].InterfaceContract
+	if contract.Summary != "Bird module API" || len(contract.Exports) != 1 || len(contract.Constructors) != 1 || len(contract.Methods) != 1 {
+		t.Fatalf("contract = %#v", contract)
+	}
+}
+
 func TestPrepareImportedPlanDefaultsRuntimeFields(t *testing.T) {
 	plan := Plan{
 		Title:   "Plan",

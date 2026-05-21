@@ -8,20 +8,29 @@ import (
 )
 
 type TaskPacket struct {
-	Role             string            `json:"role"`
-	TaskID           string            `json:"task_id"`
-	PlanID           string            `json:"plan_id"`
-	Goal             string            `json:"goal"`
-	AllowedPaths     []string          `json:"allowed_paths"`
-	ForbiddenPaths   []string          `json:"forbidden_paths,omitempty"`
-	ContextFiles     []ContextFile     `json:"context_files,omitempty"`
-	Skills           []SkillContext    `json:"skills,omitempty"`
-	WorkerProfile    string            `json:"worker_profile,omitempty"`
-	ContextPolicy    ContextPolicy     `json:"context_policy"`
-	Diagnostics      []Diagnostic      `json:"diagnostics,omitempty"`
-	ToolsAllowed     []string          `json:"tools_allowed"`
-	Verification     []string          `json:"verification,omitempty"`
-	AcceptanceChecks []AcceptanceCheck `json:"acceptance_checks,omitempty"`
+	Role                string               `json:"role"`
+	TaskID              string               `json:"task_id"`
+	PlanID              string               `json:"plan_id"`
+	Goal                string               `json:"goal"`
+	InterfaceContract   InterfaceContract    `json:"interface_contract,omitempty"`
+	DependencyContracts []DependencyContract `json:"dependency_contracts,omitempty"`
+	AllowedPaths        []string             `json:"allowed_paths"`
+	ForbiddenPaths      []string             `json:"forbidden_paths,omitempty"`
+	ContextFiles        []ContextFile        `json:"context_files,omitempty"`
+	Skills              []SkillContext       `json:"skills,omitempty"`
+	WorkerProfile       string               `json:"worker_profile,omitempty"`
+	ContextPolicy       ContextPolicy        `json:"context_policy"`
+	Diagnostics         []Diagnostic         `json:"diagnostics,omitempty"`
+	ToolsAllowed        []string             `json:"tools_allowed"`
+	Verification        []string             `json:"verification,omitempty"`
+	AcceptanceChecks    []AcceptanceCheck    `json:"acceptance_checks,omitempty"`
+}
+
+type DependencyContract struct {
+	TaskID            string            `json:"task_id"`
+	Title             string            `json:"title,omitempty"`
+	AllowedPaths      []string          `json:"allowed_paths,omitempty"`
+	InterfaceContract InterfaceContract `json:"interface_contract,omitempty"`
 }
 
 type ContextFile struct {
@@ -118,14 +127,15 @@ func BuildTaskPacket(task Task, opts ContextPackOptions) (TaskPacket, error) {
 		return TaskPacket{}, err
 	}
 	packet := TaskPacket{
-		Role:           "worker",
-		TaskID:         task.ID,
-		PlanID:         task.PlanID,
-		Goal:           task.Goal,
-		AllowedPaths:   allowed,
-		ForbiddenPaths: task.ForbiddenPaths,
-		ContextFiles:   contextFiles,
-		Skills:         opts.Skills,
+		Role:              "worker",
+		TaskID:            task.ID,
+		PlanID:            task.PlanID,
+		Goal:              task.Goal,
+		InterfaceContract: task.InterfaceContract,
+		AllowedPaths:      allowed,
+		ForbiddenPaths:    task.ForbiddenPaths,
+		ContextFiles:      contextFiles,
+		Skills:            opts.Skills,
 		ContextPolicy: ContextPolicy{
 			Mode:         "tool_requested",
 			RequestTools: []string{"read_file", "read_file_range", "search_files"},

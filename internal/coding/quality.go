@@ -14,9 +14,101 @@ type PlanQualityIssue struct {
 }
 
 func RepairPlanQuality(plan Plan) Plan {
+	repairMissingInterfaceContracts(plan.Tasks)
 	repairInteractivePythonCoordinatorDependencies(plan.Tasks)
 	repairDependencyIntegrationAllowedPaths(plan.Tasks)
+	repairDependencyContextFiles(plan.Tasks)
+	repairIntermediateDependencyPathsReadOnly(plan.Tasks)
+	repairAllowedForbiddenPathConflicts(plan.Tasks)
 	return plan
+}
+
+func repairMissingInterfaceContracts(tasks []Task) {
+	for i := range tasks {
+		if !InterfaceContractEmpty(tasks[i].InterfaceContract) {
+			continue
+		}
+		if !codeArtifactTask(tasks[i]) {
+			continue
+		}
+		tasks[i].InterfaceContract = DerivedInterfaceContract(tasks[i])
+	}
+}
+
+func InterfaceContractEmpty(contract InterfaceContract) bool {
+	return strings.TrimSpace(contract.Summary) == "" &&
+		len(contract.Exports) == 0 &&
+		len(contract.Imports) == 0 &&
+		len(contract.Constructors) == 0 &&
+		len(contract.Methods) == 0 &&
+		len(contract.Attributes) == 0 &&
+		len(contract.Commands) == 0
+}
+
+func DerivedInterfaceContract(task Task) InterfaceContract {
+	paths := normalizedTaskPaths(task.AllowedPaths)
+	summary := strings.TrimSpace(task.Goal)
+	if summary == "" {
+		summary = strings.TrimSpace(task.Title)
+	}
+	if len(paths) > 0 {
+		summary = fmt.Sprintf("%s Output path(s): %s.", strings.TrimSpace(summary), strings.Join(paths, ", "))
+	}
+	contract := InterfaceContract{Summary: strings.TrimSpace(summary)}
+	for _, check := range task.AcceptanceChecks {
+		text := strings.TrimSpace(check.Description)
+		if text != "" {
+			contract.Methods = appendUniqueString(contract.Methods, text)
+		}
+	}
+	for _, command := range task.Verification {
+		contract.Commands = appendUniqueString(contract.Commands, command)
+	}
+	return contract
+}
+
+func codeArtifactTask(task Task) bool {
+	for _, path := range normalizedTaskPaths(task.AllowedPaths) {
+		lower := strings.ToLower(path)
+		switch {
+		case strings.HasSuffix(lower, ".py"),
+			strings.HasSuffix(lower, ".js"),
+			strings.HasSuffix(lower, ".ts"),
+			strings.HasSuffix(lower, ".tsx"),
+			strings.HasSuffix(lower, ".jsx"),
+			strings.HasSuffix(lower, ".go"),
+			strings.HasSuffix(lower, ".rs"),
+			strings.HasSuffix(lower, ".java"),
+			strings.HasSuffix(lower, ".cs"),
+			strings.HasSuffix(lower, ".rb"),
+			strings.HasSuffix(lower, ".php"),
+			strings.HasSuffix(lower, ".swift"),
+			strings.HasSuffix(lower, ".kt"),
+			strings.HasSuffix(lower, ".kts"):
+			return true
+		}
+	}
+	return false
+}
+
+func repairAllowedForbiddenPathConflicts(tasks []Task) {
+	for i := range tasks {
+		allowed := map[string]bool{}
+		for _, path := range normalizedTaskPaths(tasks[i].AllowedPaths) {
+			allowed[path] = true
+		}
+		if len(allowed) == 0 {
+			continue
+		}
+		var forbidden []string
+		for _, path := range normalizedTaskPaths(tasks[i].ForbiddenPaths) {
+			if allowed[path] {
+				continue
+			}
+			forbidden = append(forbidden, path)
+		}
+		tasks[i].ForbiddenPaths = forbidden
+	}
 }
 
 func repairInteractivePythonCoordinatorDependencies(tasks []Task) {
@@ -43,7 +135,6 @@ func repairInteractivePythonCoordinatorDependencies(tasks []Task) {
 			}
 			leafPath := normalizedTaskPaths(leaf.AllowedPaths)[0]
 			tasks[i].DependsOn = appendUniqueString(tasks[i].DependsOn, leaf.ID)
-			tasks[i].AllowedPaths = appendUniqueString(tasks[i].AllowedPaths, leafPath)
 			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, leafPath)
 		}
 	}
@@ -56,8 +147,9 @@ func repairDependencyIntegrationAllowedPaths(tasks []Task) {
 			byID[task.ID] = task
 		}
 	}
+	dependents := dependentTaskIDs(tasks)
 	for i := range tasks {
-		if len(tasks[i].DependsOn) < 2 || !integrationLikeTask(tasks[i]) && !singleCodeFileTask(tasks[i]) {
+		if len(tasks[i].DependsOn) < 2 || !integrationLikeTask(tasks[i]) || len(dependents[tasks[i].ID]) > 0 {
 			continue
 		}
 		for _, depID := range tasks[i].DependsOn {
@@ -68,6 +160,61 @@ func repairDependencyIntegrationAllowedPaths(tasks []Task) {
 			depPath := normalizedTaskPaths(dep.AllowedPaths)[0]
 			tasks[i].AllowedPaths = appendUniqueString(tasks[i].AllowedPaths, depPath)
 			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, depPath)
+		}
+	}
+}
+
+func repairDependencyContextFiles(tasks []Task) {
+	byID := map[string]Task{}
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) != "" {
+			byID[task.ID] = task
+		}
+	}
+	for i := range tasks {
+		for _, depID := range tasks[i].DependsOn {
+			dep, ok := byID[strings.TrimSpace(depID)]
+			if !ok || !singleCodeFileTask(dep) {
+				continue
+			}
+			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, normalizedTaskPaths(dep.AllowedPaths)[0])
+		}
+	}
+}
+
+func repairIntermediateDependencyPathsReadOnly(tasks []Task) {
+	byID := map[string]Task{}
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) != "" {
+			byID[task.ID] = task
+		}
+	}
+	dependents := dependentTaskIDs(tasks)
+	for i := range tasks {
+		if len(dependents[tasks[i].ID]) == 0 {
+			continue
+		}
+		depPaths := map[string]bool{}
+		for _, depID := range tasks[i].DependsOn {
+			dep, ok := byID[strings.TrimSpace(depID)]
+			if !ok || !singleCodeFileTask(dep) {
+				continue
+			}
+			depPath := normalizedTaskPaths(dep.AllowedPaths)[0]
+			depPaths[depPath] = true
+			tasks[i].ContextFiles = appendUniqueString(tasks[i].ContextFiles, depPath)
+		}
+		if len(depPaths) == 0 {
+			continue
+		}
+		var kept []string
+		for _, path := range normalizedTaskPaths(tasks[i].AllowedPaths) {
+			if !depPaths[path] {
+				kept = append(kept, path)
+			}
+		}
+		if len(kept) > 0 {
+			tasks[i].AllowedPaths = kept
 		}
 	}
 }
@@ -122,6 +269,9 @@ func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 		if len(task.AllowedPaths) > 8 {
 			add("allowed_paths has too many entries; split this into smaller tasks")
 		}
+		if overlaps := allowedForbiddenPathOverlaps(task); len(overlaps) > 0 {
+			add(fmt.Sprintf("allowed_paths and forbidden_paths conflict for: %s", strings.Join(overlaps, ", ")))
+		}
 		if len(task.AcceptanceChecks) == 0 {
 			add("acceptance_checks is empty; add concrete review criteria")
 		}
@@ -157,7 +307,22 @@ func ValidatePlanQuality(plan Plan) []PlanQualityIssue {
 	}
 	issues = append(issues, interactivePythonCoordinatorDependencyIssues(plan.Tasks)...)
 	issues = append(issues, integrationTaskScopeIssues(plan.Tasks)...)
+	issues = append(issues, dependentCodeTaskContextIssues(plan.Tasks)...)
 	return issues
+}
+
+func allowedForbiddenPathOverlaps(task Task) []string {
+	allowed := map[string]bool{}
+	for _, path := range normalizedTaskPaths(task.AllowedPaths) {
+		allowed[path] = true
+	}
+	var overlaps []string
+	for _, path := range normalizedTaskPaths(task.ForbiddenPaths) {
+		if allowed[path] {
+			overlaps = append(overlaps, path)
+		}
+	}
+	return overlaps
 }
 
 func interactivePythonCoordinatorDependencyIssues(tasks []Task) []PlanQualityIssue {
@@ -210,12 +375,10 @@ func integrationTaskScopeIssues(tasks []Task) []PlanQualityIssue {
 			byID[task.ID] = task
 		}
 	}
+	dependents := dependentTaskIDs(tasks)
 	var issues []PlanQualityIssue
 	for _, task := range tasks {
-		if len(task.DependsOn) < 2 || !integrationLikeTask(task) {
-			if issue, ok := dependentCodeTaskScopeIssue(task, byID); ok {
-				issues = append(issues, issue)
-			}
+		if len(task.DependsOn) < 2 || !integrationLikeTask(task) || len(dependents[task.ID]) > 0 {
 			continue
 		}
 		allowed := map[string]bool{}
@@ -246,34 +409,44 @@ func integrationTaskScopeIssues(tasks []Task) []PlanQualityIssue {
 	return issues
 }
 
-func dependentCodeTaskScopeIssue(task Task, byID map[string]Task) (PlanQualityIssue, bool) {
-	if len(task.DependsOn) < 2 || !singleCodeFileTask(task) {
-		return PlanQualityIssue{}, false
+func dependentCodeTaskContextIssues(tasks []Task) []PlanQualityIssue {
+	byID := map[string]Task{}
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ID) != "" {
+			byID[task.ID] = task
+		}
 	}
-	allowed := map[string]bool{}
-	for _, path := range normalizedTaskPaths(task.AllowedPaths) {
-		allowed[path] = true
-	}
-	var missing []string
-	for _, depID := range task.DependsOn {
-		dep, ok := byID[strings.TrimSpace(depID)]
-		if !ok || !singleCodeFileTask(dep) {
+	var issues []PlanQualityIssue
+	for _, task := range tasks {
+		if len(task.DependsOn) < 2 || !singleCodeFileTask(task) {
 			continue
 		}
-		depPath := normalizedTaskPaths(dep.AllowedPaths)[0]
-		if !allowed[depPath] {
-			missing = append(missing, depPath)
+		context := map[string]bool{}
+		for _, path := range normalizedTaskPaths(task.ContextFiles) {
+			context[path] = true
 		}
+		var missing []string
+		for _, depID := range task.DependsOn {
+			dep, ok := byID[strings.TrimSpace(depID)]
+			if !ok || !singleCodeFileTask(dep) {
+				continue
+			}
+			depPath := normalizedTaskPaths(dep.AllowedPaths)[0]
+			if !context[depPath] {
+				missing = append(missing, depPath)
+			}
+		}
+		if len(missing) < 2 {
+			continue
+		}
+		issues = append(issues, PlanQualityIssue{
+			TaskID:    task.ID,
+			TaskTitle: task.Title,
+			Severity:  "error",
+			Message:   fmt.Sprintf("dependent code task composes multiple module drafts but lacks their context; add dependency module paths to context_files: %s", strings.Join(missing, ", ")),
+		})
 	}
-	if len(missing) < 2 {
-		return PlanQualityIssue{}, false
-	}
-	return PlanQualityIssue{
-		TaskID:    task.ID,
-		TaskTitle: task.Title,
-		Severity:  "error",
-		Message:   fmt.Sprintf("dependent code task composes multiple module drafts but cannot edit their integration surfaces; add dependency module paths to allowed_paths: %s", strings.Join(missing, ", ")),
-	}, true
+	return issues
 }
 
 func integrationLikeTask(task Task) bool {
@@ -284,6 +457,19 @@ func integrationLikeTask(task Task) bool {
 		}
 	}
 	return false
+}
+
+func dependentTaskIDs(tasks []Task) map[string][]string {
+	out := map[string][]string{}
+	for _, task := range tasks {
+		for _, depID := range task.DependsOn {
+			depID = strings.TrimSpace(depID)
+			if depID != "" {
+				out[depID] = append(out[depID], task.ID)
+			}
+		}
+	}
+	return out
 }
 
 func overSerializedDistinctCodeModuleChain(tasks []Task) []string {
