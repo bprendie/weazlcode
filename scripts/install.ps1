@@ -1,6 +1,5 @@
 param(
-    [switch]$SkipLaunch,
-    [switch]$SkipSetup
+    [switch]$SkipLaunch
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,21 +17,16 @@ if ($env:WEAZLCODE_HOME) {
 
 $BinDir = Join-Path $InstallRoot "bin"
 $ConfigDir = Join-Path $InstallRoot "config"
-$VaultDir = Join-Path $InstallRoot "vaults"
 $CacheDir = Join-Path $InstallRoot "cache"
 $GoCache = if ($env:GOCACHE) { $env:GOCACHE } else { Join-Path $CacheDir "go-build" }
 $GoModCache = if ($env:GOMODCACHE) { $env:GOMODCACHE } else { Join-Path $CacheDir "go-mod" }
 $ExePath = Join-Path $BinDir "$AppName.exe"
-$MsysRoot = if ($env:MSYS2_ROOT) { $env:MSYS2_ROOT } else { "C:\msys64" }
-$MsysBash = Join-Path $MsysRoot "usr\bin\bash.exe"
-$MsysUcrtBin = Join-Path $MsysRoot "ucrt64\bin"
 
 function Refresh-SessionPath {
     $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $extra = @(
         $BinDir,
-        $MsysUcrtBin,
         "C:\Program Files\Go\bin",
         (Join-Path $HOME "go\bin")
     ) | Where-Object { $_ -and (Test-Path $_) }
@@ -80,55 +74,15 @@ function Ensure-Go {
     }
 }
 
-function Ensure-Git {
-    Refresh-SessionPath
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        return
-    }
-    Require-Winget
-    Write-Host "Installing Git with winget..."
-    winget install --id Git.Git --source winget --accept-package-agreements --accept-source-agreements
-    Refresh-SessionPath
-    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-        throw "Git was installed but is not visible on PATH yet. Open a new PowerShell window and rerun scripts\install.ps1."
-    }
-}
-
-function Ensure-Msys2Gcc {
-    Refresh-SessionPath
-    if (Get-Command gcc -ErrorAction SilentlyContinue) {
-        return
-    }
-    if (-not (Test-Path $MsysBash)) {
-        Require-Winget
-        Write-Host "Installing MSYS2 with winget..."
-        winget install --id MSYS2.MSYS2 --source winget --accept-package-agreements --accept-source-agreements
-    }
-    if (-not (Test-Path $MsysBash)) {
-        throw "MSYS2 bash was not found at $MsysBash. Install MSYS2 or set MSYS2_ROOT, then rerun scripts\install.ps1."
-    }
-    Write-Host "Installing MSYS2 UCRT64 GCC toolchain..."
-    & $MsysBash -lc "pacman -Syu --noconfirm"
-    & $MsysBash -lc "pacman -S --needed --noconfirm mingw-w64-ucrt-x86_64-gcc"
-    Add-UserPath $MsysUcrtBin
-    Refresh-SessionPath
-    if (-not (Get-Command gcc -ErrorAction SilentlyContinue)) {
-        throw "GCC was installed but is not visible on PATH. Open a new PowerShell window and rerun scripts\install.ps1."
-    }
-}
-
-New-Item -ItemType Directory -Force -Path $BinDir, $ConfigDir, $VaultDir, $GoCache, $GoModCache | Out-Null
+New-Item -ItemType Directory -Force -Path $BinDir, $ConfigDir, $GoCache, $GoModCache | Out-Null
 
 Ensure-Go
-Ensure-Git
-Ensure-Msys2Gcc
 Add-UserPath $BinDir
 Refresh-SessionPath
 
 Write-Host "Building $AppName..."
 Push-Location $RepoRoot
 try {
-    $env:CGO_ENABLED = "1"
     $env:GOCACHE = $GoCache
     $env:GOMODCACHE = $GoModCache
     go build -buildvcs=false -o $ExePath .\cmd\weazlcode
@@ -138,23 +92,10 @@ try {
 
 Write-Host "Installed $AppName to $ExePath"
 Write-Host "Config: $ConfigDir\config.json"
-Write-Host "Vaults: $VaultDir"
 Write-Host "If PowerShell cannot find $AppName yet, open a new terminal or run:"
 Write-Host "  `$env:Path = `"$BinDir;`$env:Path`""
 
-$SkipSetupEnv = $env:WEAZLCODE_SKIP_SETUP -eq "1"
 $SkipLaunchEnv = $env:WEAZLCODE_SKIP_LAUNCH -eq "1"
-
-if (-not $SkipSetup -and -not $SkipSetupEnv) {
-    Write-Host ""
-    Write-Host "Configuring provider and optional tools..."
-    Push-Location $RepoRoot
-    try {
-        go run -buildvcs=false .\cmd\weazlcode-setup
-    } finally {
-        Pop-Location
-    }
-}
 
 if ($SkipLaunch -or $SkipLaunchEnv) {
     Write-Host "Skipping first launch."

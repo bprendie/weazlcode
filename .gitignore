@@ -1,17 +1,35 @@
-/.gocache/
-/.gomodcache/
-/.weazlcode/
-/.weazlcode-smoke/
-/.weazlcode-slash-smoke/
-/.weazlcode-plan-smoke/
-/.weazlcode-packet-smoke/
-/weazlchat
-/weazlcode
-/weazlcode-setup
-/smoketest/
+# Binaries
+weazlcode
 *.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
 *.test
+
+# Output of the go coverage tool
 *.out
-/planning_docs/local_modularization_plan.md
-/planning_docs/local_remediation_phase_plan.md
-/planning_docs/local_live_static_site_remediation_plan.md
+
+# Dependency directories
+vendor/
+.gocache/
+.gomodcache/
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# WeazlCode specific
+.weazlcode/
+*.weazlcode.json

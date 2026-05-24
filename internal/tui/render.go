@@ -1,512 +1,272 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/bprendie/weazlcode/internal/config"
-	"github.com/bprendie/weazlcode/internal/storage"
+	"github.com/bprendie/weazlcode/internal/coding"
 )
 
-func (m model) View() string {
-	header := renderLogo(ansiHeader(), max(20, m.width-6))
-	statusParts := []string{m.modelProviderBar()}
-	if strings.TrimSpace(m.status) != "" {
-		statusParts = append(statusParts, strings.TrimSpace(m.status))
+// View renders the TUI.
+func (m Model) View() string {
+	if !m.ready {
+		return m.styles.Spinner.Render("⚡ Initializing WeazlCode...")
 	}
-	statusText := strings.Join(statusParts, " | ")
-	status := m.styles.status.Render(statusText)
-	if m.err != "" {
-		status = m.styles.system.Render("! " + m.err)
+
+	screenW := max(20, m.width)
+	screenH := max(8, m.height)
+	header := m.renderHeader()
+	status := m.renderStatus()
+	input := m.renderInput()
+	help := m.renderHelp()
+	content := renderPanel(m.styles.Panel, screenW, m.bodyHeight(), m.viewport.View())
+
+	out := lipgloss.JoinVertical(lipgloss.Left, header, status, content, input, help)
+	return m.styles.Frame.
+		Width(screenW).
+		Height(screenH).
+		MaxWidth(screenW).
+		MaxHeight(screenH).
+		Render(out)
+}
+
+func (m Model) bodyHeight() int {
+	header := m.renderHeader()
+	status := m.renderStatus()
+	input := m.renderInput()
+	help := m.renderHelp()
+	used := lineCount(header) + lineCount(status) + lineCount(input) + lineCount(help)
+	return max(1, max(8, m.height)-used)
+}
+
+func renderPanel(style lipgloss.Style, outerW, outerH int, content string) string {
+	return style.
+		Width(contentWidth(style, outerW)).
+		Height(contentHeight(style, outerH)).
+		MaxWidth(outerW).
+		MaxHeight(outerH).
+		Render(content)
+}
+
+func contentWidth(style lipgloss.Style, outerW int) int {
+	return max(1, outerW-style.GetHorizontalFrameSize())
+}
+
+func contentHeight(style lipgloss.Style, outerH int) int {
+	return max(1, outerH-style.GetVerticalFrameSize())
+}
+
+func lineCount(s string) int {
+	if s == "" {
+		return 0
 	}
-	body := ""
+	return len(strings.Split(s, "\n"))
+}
+
+func (m *Model) resize() {
+	screenW := max(20, m.width)
+	bodyH := m.bodyHeight()
+	m.viewport.Width = contentWidth(m.styles.Panel, screenW)
+	m.viewport.Height = contentHeight(m.styles.Panel, bodyH)
+	m.input.SetWidth(max(20, screenW-m.styles.Input.GetHorizontalFrameSize()))
+	m.renderMessages()
+}
+
+func (m Model) renderHeader() string {
+	screenW := max(20, m.width)
+	title := renderLogoBanner(asciiLogo(), screenW)
+	if m.height > 0 && m.height < 24 {
+		title = compactLogoBanner(screenW)
+	}
+	banner := m.styles.Header.Render(title)
+
+	projectLabel := lipgloss.NewStyle().Foreground(neonCyan).Bold(true).Render("PROJECT")
+	projectName := lipgloss.NewStyle().Foreground(neonPink).Bold(true).Render(m.project.Name)
+	rootLabel := lipgloss.NewStyle().Foreground(textDim).Render("root:")
+	fixedWidth := lipgloss.Width(projectLabel) + 1 + lipgloss.Width(projectName) + 2 + lipgloss.Width(rootLabel) + 1
+	rootPath := lipgloss.NewStyle().Foreground(textGlow).Render(truncateMiddle(m.project.Root, max(8, screenW-fixedWidth)))
+	projectInfo := lipgloss.JoinHorizontal(lipgloss.Left, projectLabel, " ", projectName, "  ", rootLabel, " ", rootPath)
+
+	return lipgloss.JoinVertical(lipgloss.Left, banner, m.styles.Status.MaxWidth(screenW).Render(projectInfo))
+}
+
+func (m Model) renderStatus() string {
+	screenW := max(20, m.width)
+	parts := m.statusParts(screenW)
+
+	if m.runState != nil && m.currentPlan != nil {
+		progress := m.styles.RenderTaskProgress(m.runState.CompletedTasks, len(m.currentPlan.Tasks), m.runState.ActiveWorkers)
+		elapsed := lipgloss.NewStyle().Foreground(neonOrange).Render(fmt.Sprintf("%.1fs", m.runState.ElapsedSeconds))
+		parts = append(parts, progress, elapsed)
+	}
+
+	status := m.styles.RenderStatusLine(parts...)
+	if lipgloss.Width(status) <= screenW {
+		return status
+	}
+	return m.styles.Status.Render(strings.Join(m.compactStatusParts(screenW), "\n"))
+}
+
+func (m Model) statusParts(width int) []string {
+	if width < 110 {
+		return m.compactStatusParts(width)
+	}
+	return []string{
+		m.styles.RenderProviderBadge("PLAN", m.config.Planner.Provider, m.config.Planner.Model),
+		m.styles.RenderProviderBadge("WORK", m.config.Worker.Provider, m.config.Worker.Model),
+		m.styles.RenderProviderBadge("REVW", m.config.Reviewer.Provider, m.config.Reviewer.Model),
+	}
+}
+
+func (m Model) compactStatusParts(width int) []string {
+	partWidth := max(18, width-2)
+	return []string{
+		m.compactProvider("PLAN", m.config.Planner.Provider, m.config.Planner.Model, partWidth),
+		m.compactProvider("WORK", m.config.Worker.Provider, m.config.Worker.Model, partWidth),
+		m.compactProvider("REVW", m.config.Reviewer.Provider, m.config.Reviewer.Model, partWidth),
+	}
+}
+
+func (m Model) compactProvider(role, provider, model string, width int) string {
+	roleText := lipgloss.NewStyle().Foreground(neonPurple).Bold(true).Render(role)
+	providerText := lipgloss.NewStyle().Foreground(neonCyan).Bold(true).Render(provider)
+	fixed := lipgloss.Width(roleText) + 1 + lipgloss.Width(providerText) + 1
+	modelText := lipgloss.NewStyle().Foreground(textGlow).Render(truncateMiddle(model, max(6, width-fixed)))
+	return lipgloss.JoinHorizontal(lipgloss.Left, roleText, " ", providerText, "/", modelText)
+}
+
+func (m Model) renderInput() string {
+	if m.mode == "planning" {
+		return m.styles.RenderSpinner(m.spinner.View(), "PLANNING IMPLEMENTATION...")
+	}
+	if m.mode == "running" {
+		return m.styles.RenderSpinner(m.spinner.View(), "EXECUTING TASKS...")
+	}
+
+	inputStyle := m.styles.Input
+	if m.input.Focused() {
+		inputStyle = m.styles.InputFocus
+	}
+	return inputStyle.Width(max(20, m.width-6)).Render(m.input.View())
+}
+
+func (m Model) renderHelp() string {
+	helpParts := []string{
+		m.styles.HelpKey.Render("esc") + m.styles.HelpValue.Render(" back"),
+		m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" quit"),
+	}
 	switch m.mode {
-	case modeVault:
-		body = m.styles.panel.Render("Encrypted history password\n\n" + m.input.View())
-	case modeServer:
-		p := m.cfg.Active()
-		body = m.styles.panel.Render(fmt.Sprintf("Server URL for %s / %s\n\n%s", p.Type, p.Model, m.input.View()))
-	case modeLoading:
-		body = m.styles.panel.Render(fmt.Sprintf("%s loading previous session", m.working.View()))
-	case modeRenameWorkspace:
-		body = m.renameWorkspaceView()
-	case modeClearContext:
-		body = m.clearContextView()
-	case modeToolApproval:
-		body = m.toolApprovalView()
-	case modeSessions:
-		body = m.sessions.View()
-	case modeWorkspace:
-		body = m.workspaces.View()
+	case "input":
+		helpParts = []string{
+			m.styles.HelpKey.Render("enter") + m.styles.HelpValue.Render(" send"),
+			m.styles.HelpKey.Render("/plan") + m.styles.HelpValue.Render(" <directive>"),
+			m.styles.HelpKey.Render("/help") + m.styles.HelpValue.Render(" commands"),
+			m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" quit"),
+		}
+	case "planning":
+		helpParts = []string{m.styles.Info.Render("⚡ Planning..."), m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" abort")}
+	case "running":
+		helpParts = []string{m.styles.Info.Render("⚡ Executing..."), m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" abort")}
+	}
+
+	separator := lipgloss.NewStyle().Foreground(neonPurple).Render(" ▸ ")
+	help := strings.Join(helpParts, separator)
+	if lipgloss.Width(help) > max(20, m.width) {
+		help = m.compactHelpText()
+	}
+	return m.styles.Help.MaxWidth(max(20, m.width)).Render(help)
+}
+
+func (m Model) compactHelpText() string {
+	switch m.mode {
+	case "planning":
+		return m.styles.Info.Render("⚡ Planning") + " " + m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" abort")
+	case "running":
+		return m.styles.Info.Render("⚡ Executing") + " " + m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" abort")
 	default:
-		input := m.inputView()
-		if m.thinking {
-			input = m.thinkingView()
-		}
-		body = m.viewport.View() + "\n" + m.metricsView() + "\n" + m.styles.input.Width(max(20, m.width-6)).Render(input)
+		return m.styles.HelpKey.Render("enter") + m.styles.HelpValue.Render(" send") + " " +
+			m.styles.HelpKey.Render("/plan") + " " +
+			m.styles.HelpKey.Render("ctrl+c") + m.styles.HelpValue.Render(" quit")
 	}
-	help := m.styles.help.Render(m.helpText())
-	return m.styles.frame.Width(m.width).Height(m.height).Render(strings.Join([]string{header, status, body, help}, "\n"))
 }
 
-func (m model) modelProviderBar() string {
-	return strings.Join([]string{
-		roleProviderBadge("plan", m.providerNameForRole("orchestrator"), m.cfg.ProviderForRole("orchestrator")),
-		roleProviderBadge("worker", m.providerNameForRole("worker"), m.cfg.ProviderForRole("worker")),
-		roleProviderBadge("review", m.providerNameForRole("reviewer"), m.cfg.ProviderForRole("reviewer")),
-	}, "  ")
-}
-
-func roleProviderBadge(role, name string, provider config.Provider) string {
-	if provider.Type == "" && provider.Model == "" {
-		return fmt.Sprintf("%s:%s missing", role, name)
+func truncateMiddle(s string, width int) string {
+	if width <= 0 || lipgloss.Width(s) <= width {
+		return s
 	}
-	return fmt.Sprintf("%s:%s/%s", role, provider.Type, provider.Model)
+	if width <= 3 {
+		return strings.Repeat(".", width)
+	}
+	runes := []rune(s)
+	left := max(1, (width-3)/2)
+	right := max(1, width-3-left)
+	if left+right >= len(runes) {
+		return s
+	}
+	return string(runes[:left]) + "..." + string(runes[len(runes)-right:])
 }
 
-func (m model) renameWorkspaceView() string {
-	w := max(20, m.width-6)
-	popupWidth := min(64, max(24, w-4))
-	prompt := m.styles.help.Render("shown in picker as <name>: timestamp")
-	return lipgloss.PlaceHorizontal(w, lipgloss.Center, lipgloss.NewStyle().
-		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(crushPink).
-		Background(panel).
-		Padding(1, 2).
-		Render("Rename workspace\n\n"+m.input.View()+"\n"+prompt))
-}
-
-func (m model) clearContextView() string {
-	w := max(20, m.width-6)
-	popupWidth := min(66, max(30, w-4))
-	count := len(m.messages)
-	copy := fmt.Sprintf("Clear this session's active context?\n\nThis deletes %d message(s), tool-call history, and context checkpoints from SQLite for the current session.\n\n[ enter yes ]   [ esc no ]", count)
-	return lipgloss.PlaceHorizontal(w, lipgloss.Center, lipgloss.NewStyle().
-		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(crushPink).
-		Background(panel).
-		Padding(1, 2).
-		Render(copy))
-}
-
-func (m model) toolApprovalView() string {
-	w := max(20, m.width-6)
-	popupWidth := min(86, max(36, w-4))
+func (m *Model) renderMessages() {
 	var b strings.Builder
-	b.WriteString("Approve tool calls\n\n")
-	for i, call := range m.pendingTools {
-		tool, ok := m.toolRegistry.Get(call.Function.Name)
-		safety := "missing"
-		description := "Tool is not registered."
-		if ok {
-			safety = safetyLabel(tool.SafetyLevel())
-			description = tool.Description()
-		}
-		fmt.Fprintf(&b, "%d. %s [%s]\n", i+1, call.Function.Name, safety)
-		if strings.TrimSpace(description) != "" {
-			fmt.Fprintf(&b, "   %s\n", description)
-		}
-		if strings.TrimSpace(call.Function.Arguments) != "" {
-			fmt.Fprintf(&b, "   args: %s\n", oneLine(call.Function.Arguments, popupWidth-12))
-		}
-	}
-	b.WriteString("\n[ enter approve ]   [ esc reject ]")
-	return lipgloss.PlaceHorizontal(w, lipgloss.Center, lipgloss.NewStyle().
-		Width(popupWidth).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(crushPink).
-		Background(panel).
-		Padding(1, 2).
-		Render(b.String()))
-}
-
-// renderMessages updates the viewport with the current message history and streaming state
-func (m *model) renderMessages() {
-	var b strings.Builder
-	b.WriteString(m.renderTranscript(m.messages))
-	if m.thinking {
-		b.WriteString(m.styles.assistant.Render("ai"))
-		b.WriteString("\n")
-		if len(m.pendingTools) > 0 {
-			b.WriteString(m.styles.system.Render("🔧 using tools"))
-			b.WriteString("\n")
-		}
-		if m.streamText == "" {
-			b.WriteString(m.thinkingView())
-		} else {
-			b.WriteString(wrapText(m.streamText, m.viewport.Width))
-		}
+	if len(m.messages) == 0 {
+		welcome := lipgloss.NewStyle().Foreground(neonCyan).Bold(true).Render("⬢ WEAZLCODE V2 ONLINE")
+		info := lipgloss.NewStyle().Foreground(textGlow)
+		b.WriteString(welcome)
 		b.WriteString("\n\n")
+		b.WriteString(info.Render("Split-brain AI coding system ready."))
+		b.WriteString("\n")
+		b.WriteString(info.Render("Enter a directive to begin, or use "))
+		b.WriteString(m.styles.HelpKey.Render("/help"))
+		b.WriteString(info.Render(" for commands."))
+	} else {
+		for _, msg := range m.messages {
+			b.WriteString(m.messageLabel(msg.Role))
+			b.WriteString("\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(textGlow).Render(msg.Content))
+			b.WriteString("\n\n")
+		}
 	}
 	m.viewport.SetContent(b.String())
 	m.viewport.GotoBottom()
 }
 
-func (m *model) renderTranscript(messages []storage.Message) string {
+func (m Model) messageLabel(role string) string {
+	switch role {
+	case "user":
+		return m.styles.User.Render("▸ YOU")
+	case "assistant":
+		return m.styles.Assistant.Render("◂ AI")
+	default:
+		return m.styles.System.Render("⬢ SYS")
+	}
+}
+
+func renderPlanSummary(plan *coding.Plan) string {
+	if plan == nil {
+		return "No plan."
+	}
 	var b strings.Builder
-	if len(messages) == 0 {
-		b.WriteString(m.styles.system.Render("WeazlCode is ready. Local providers only."))
-		if m.cfg.Tools.Enabled {
+	b.WriteString("PLAN READY\n\nDirective: ")
+	b.WriteString(plan.Directive)
+	b.WriteString("\n\nTasks:\n")
+	for i, task := range plan.Tasks {
+		b.WriteString(fmt.Sprintf("%d. %s\n", i+1, task.ID))
+		b.WriteString("   Goal: ")
+		b.WriteString(task.Goal)
+		b.WriteString("\n")
+		if len(task.OutputFiles) > 0 {
+			b.WriteString("   Files: ")
+			b.WriteString(strings.Join(task.OutputFiles, ", "))
 			b.WriteString("\n")
-			b.WriteString(m.styles.system.Render("Tools enabled: " + strings.Join(m.getToolNames(), ", ")))
 		}
-	} else {
-		for _, msg := range messages {
-			if msg.Role == "tool" {
-				continue
-			}
-			if msg.Role == "assistant" && strings.TrimSpace(msg.Content) == "" {
-				if label := toolCallLabel(msg.ToolCalls); label != "" {
-					b.WriteString(m.styles.system.Render(label))
-					b.WriteString("\n\n")
-				}
-				continue
-			}
-
-			label := m.styles.user.Render("you")
-			if msg.Role == "assistant" {
-				label = m.styles.assistant.Render("ai")
-			}
-			b.WriteString(label)
+		if task.VerifyCommand != "" {
+			b.WriteString("   Verify: ")
+			b.WriteString(task.VerifyCommand)
 			b.WriteString("\n")
-
-			if msg.Content != "" {
-				b.WriteString(m.renderContent(msg.Role, msg.Content))
-			}
-			b.WriteString("\n\n")
 		}
 	}
+	b.WriteString("\nUse /approve to run this plan.")
 	return b.String()
 }
-
-func toolCallLabel(raw string) string {
-	if raw == "" {
-		return ""
-	}
-	var calls []struct {
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
-	}
-	if err := json.Unmarshal([]byte(raw), &calls); err != nil || len(calls) == 0 {
-		return "🔧 used tools"
-	}
-	names := make([]string, 0, len(calls))
-	for _, call := range calls {
-		if call.Function.Name != "" {
-			names = append(names, call.Function.Name)
-		}
-	}
-	if len(names) == 0 {
-		return "🔧 used tools"
-	}
-	return "🔧 used " + strings.Join(names, ", ")
-}
-
-// getToolNames returns a list of registered tool names
-func (m model) getToolNames() []string {
-	if m.toolRegistry == nil {
-		return nil
-	}
-	tools := m.toolRegistry.List()
-	names := make([]string, len(tools))
-	for i, tool := range tools {
-		names[i] = tool.Name()
-	}
-	return names
-}
-
-// thinkingView returns the spinner view with appropriate status text
-func (m model) thinkingView() string {
-	if m.trimming {
-		return fmt.Sprintf("%s %s compacting_context_checkpoint", m.working.View(), m.processingModelLabel("summarizer"))
-	}
-	return fmt.Sprintf("%s %s %s", m.working.View(), m.processingModelLabel(m.processingRole()), m.thinkingPhrase())
-}
-
-func (m model) processingRole() string {
-	if len(m.workerRuns) > 0 {
-		return "worker"
-	}
-	if m.activeModelRunID != 0 {
-		status := strings.ToLower(m.status)
-		switch {
-		case strings.Contains(status, "reviewer"):
-			return "reviewer"
-		case strings.Contains(status, "worker"):
-			return "worker"
-		default:
-			return "orchestrator"
-		}
-	}
-	status := strings.ToLower(m.status)
-	switch {
-	case strings.Contains(status, "worker"):
-		return "worker"
-	case strings.Contains(status, "reviewer"):
-		return "reviewer"
-	case strings.Contains(status, "plan"), strings.Contains(status, "orchestrator"):
-		return "orchestrator"
-	default:
-		return "orchestrator"
-	}
-}
-
-func (m model) processingModelLabel(role string) string {
-	p := m.cfg.ProviderForRole(role)
-	name := m.providerNameForRole(role)
-	if p.Type == "" && p.Model == "" {
-		return fmt.Sprintf("[%s:%s missing]", role, name)
-	}
-	return fmt.Sprintf("[%s:%s/%s]", role, p.Type, p.Model)
-}
-
-// thinkingPhrase returns a cyberpunk-themed status phrase that changes slowly during generation
-func (m model) thinkingPhrase() string {
-	if len(modelThinkingPhrases) == 0 || m.streamAt.IsZero() {
-		return "model_is_thinking"
-	}
-	phase := min(2, int(time.Since(m.streamAt)/(20*time.Second)))
-	start := int((m.streamAt.UnixNano() / int64(time.Millisecond)) % int64(len(modelThinkingPhrases)))
-	idx := (start + phase) % len(modelThinkingPhrases)
-	return modelThinkingPhrases[idx]
-}
-
-// metricsView returns the formatted metrics bar showing context usage and token counts
-func (m model) metricsView() string {
-	totalIn := m.session.InputTokens + m.reqIn
-	totalOut := m.session.OutputTokens + m.reqOut
-	tps := 0.0
-	if m.thinking && !m.streamAt.IsZero() {
-		elapsed := time.Since(m.streamAt).Seconds()
-		if elapsed > 0 {
-			tps = float64(m.reqOut) / elapsed
-		}
-	}
-	budget := m.contextBudget()
-	contextTokens := m.contextTokenEstimate()
-	pct := min(1.0, float64(contextTokens)/float64(budget))
-	parts := append(m.statusBadges(contextTokens, budget),
-		fmt.Sprintf("ctx %s %d/%d", m.contextBar.ViewAs(pct), contextTokens, budget),
-		fmt.Sprintf("in %d", totalIn),
-		fmt.Sprintf("out %d", totalOut),
-		fmt.Sprintf("%.1f t/s", tps),
-	)
-	if badge := m.taskProgressBadge(); badge != "" {
-		parts = append(parts, badge)
-	}
-	text := strings.Join(parts, "  ")
-	width := max(20, m.width-6)
-	if len(text) < width {
-		text = strings.Repeat(" ", width-len(text)) + text
-	}
-	return m.styles.help.Render(text)
-}
-
-func (m model) taskProgressBadge() string {
-	if m.store == nil || strings.TrimSpace(m.session.ID) == "" {
-		return ""
-	}
-	plan, ok, err := m.store.LatestPlan(m.session.ID)
-	if err != nil || !ok {
-		return ""
-	}
-	spinnerFrame := ""
-	progress := taskProgressForPlan(plan)
-	if progress.Running > 0 || progress.Reviewing > 0 {
-		spinnerFrame = m.working.View()
-	}
-	return taskProgressBadgeWithSpinner(plan, spinnerFrame)
-}
-
-// helpText returns context-appropriate help text for the current mode
-func (m model) helpText() string {
-	if m.mode == modeLoading {
-		return "loading previous session | ctrl+c quit"
-	}
-	if m.mode == modeRenameWorkspace {
-		return "enter save rename | esc cancel | ctrl+c quit"
-	}
-	if m.mode == modeClearContext {
-		return "enter clear context | esc cancel | ctrl+c quit"
-	}
-	if m.mode == modeToolApproval {
-		return "enter approve tools | esc reject tools | ctrl+c quit"
-	}
-	if m.mode == modeSessions {
-		return "enter resume | ctrl+d delete session | esc back | ctrl+c quit"
-	}
-	if m.mode == modeWorkspace {
-		return "enter replay | ctrl+e rename | ctrl+d delete | esc back | ctrl+c quit"
-	}
-	if m.mode == modeIDEView {
-		return "/ commands | /chat back | wheel/pgup/pgdn scroll | esc chat | ctrl+c quit"
-	}
-	mouseHelp := "ctrl+m copy"
-	if !m.mouseScroll {
-		mouseHelp = "ctrl+m mouse"
-	}
-	renameHelp := ""
-	if m.activeWorkspaceID != 0 {
-		renameHelp = " | ctrl+e rename"
-	}
-	return "/ commands | enter send/select | wheel/pgup/pgdn scroll | " + mouseHelp + " | ctrl+n new | ctrl+t trim | ctrl+u clear | ctrl+r workspaces | ctrl+s save" + renameHelp + " | ctrl+c quit"
-}
-
-// inputView returns the input field view with paste indicator if applicable
-func (m model) inputView() string {
-	if m.pasteText == "" {
-		return m.input.View()
-	}
-	prefix := strings.TrimSpace(m.input.Value())
-	badge := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#0D0D12")).
-		Background(lipgloss.Color("#F3E600")).
-		Bold(true).
-		Padding(0, 1).
-		Render(fmt.Sprintf("[PASTED %d lines]", m.pasteLines))
-	if prefix == "" {
-		return badge
-	}
-	return m.input.View() + " " + badge
-}
-
-// resize updates component dimensions based on terminal size
-func (m *model) resize() {
-	w := max(20, m.width-6)
-	h := max(5, m.height-16)
-	m.viewport.Width = w
-	m.viewport.Height = h
-	m.sessions.SetSize(w, h+4)
-	m.workspaces.SetSize(w, h+4)
-	m.contextBar.Width = min(28, max(10, w/4))
-	m.markdown.Resize(w)
-}
-
-func (m *model) renderContent(role, content string) string {
-	if role == "assistant" {
-		return m.markdown.Render(content, m.viewport.Width)
-	}
-	return wrapText(content, m.viewport.Width)
-}
-
-// ansiHeader returns the ASCII art header
-func ansiHeader() string {
-	return ` __      __          _______________.__    .____  _______       .___________  
-/  \    /  \ ____   /  |  \____    /|  |   |   _| \   _  \    __| _/\_____  \ 
-\   \/\/   // __ \ /   |  |_/     / |  |   |  |   /  /_\  \  / __ |   _(__  < 
- \        /\  ___//    ^   /     /_ |  |__ |  |   \  \_/   \/ /_/ |  /       \
-  \__/\  /  \___  >____   /_______ \|____/ |  |_   \_____  /\____ | /______  /
-       \/       \/     |__|       \/       |____|        \/      \/        \/ `
-}
-
-// trimTitle shortens a title to fit display constraints
-func trimTitle(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) <= 48 {
-		return s
-	}
-	return s[:45] + "..."
-}
-
-// wrapText wraps text to fit within the specified width, preserving paragraphs
-func wrapText(s string, width int) string {
-	width = max(10, width)
-	var out strings.Builder
-	paragraphs := strings.Split(s, "\n")
-	for i, paragraph := range paragraphs {
-		if paragraph == "" {
-			if i < len(paragraphs)-1 {
-				out.WriteByte('\n')
-			}
-			continue
-		}
-		out.WriteString(wrapLine(paragraph, width))
-		if i < len(paragraphs)-1 {
-			out.WriteByte('\n')
-		}
-	}
-	return out.String()
-}
-
-// wrapLine wraps a single line of text to fit within the specified width
-func wrapLine(s string, width int) string {
-	words := strings.Fields(s)
-	if len(words) == 0 {
-		return ""
-	}
-	var out strings.Builder
-	lineWidth := 0
-	for _, word := range words {
-		wordWidth := lipgloss.Width(word)
-		if lineWidth > 0 && lineWidth+1+wordWidth > width {
-			out.WriteByte('\n')
-			lineWidth = 0
-		}
-		if lineWidth > 0 {
-			out.WriteByte(' ')
-			lineWidth++
-		}
-		if wordWidth <= width {
-			out.WriteString(word)
-			lineWidth += wordWidth
-			continue
-		}
-		for _, r := range word {
-			rw := lipgloss.Width(string(r))
-			if lineWidth > 0 && lineWidth+rw > width {
-				out.WriteByte('\n')
-				lineWidth = 0
-			}
-			out.WriteRune(r)
-			lineWidth += rw
-		}
-	}
-	return out.String()
-}
-
-// estimateMessages estimates total tokens for a slice of messages
-func estimateMessages(messages []storage.Message) int {
-	total := 0
-	for _, msg := range messages {
-		total += estimateTokens(msg.Content)
-		total += estimateTokens(msg.ToolCalls)
-	}
-	return total
-}
-
-// estimateTokens provides a rough token count estimate for text
-func estimateTokens(s string) int {
-	words := len(strings.Fields(s))
-	if words == 0 {
-		return 0
-	}
-	return max(1, int(float64(words)*1.33))
-}
-
-// countLines counts the number of lines in a string
-func countLines(s string) int {
-	if s == "" {
-		return 0
-	}
-	return strings.Count(s, "\n") + 1
-}
-
-// limitToolOutput truncates tool output to the specified maximum character count
-func limitToolOutput(s string, maxChars int) string {
-	if maxChars <= 0 {
-		maxChars = 12000
-	}
-	if len(s) <= maxChars {
-		return s
-	}
-	return s[:maxChars] + fmt.Sprintf("\n\n[truncated: %d chars omitted]", len(s)-maxChars)
-}
-
-// Made with Bob

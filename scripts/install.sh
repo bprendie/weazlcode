@@ -108,15 +108,8 @@ echo "Installed $APP_NAME to $BIN_PATH"
 echo "If your shell cannot find it yet, restart the shell or run:"
 echo "  $path_line"
 
-echo ""
-echo "Configuring provider and optional tools..."
-(
-  cd "$REPO_ROOT"
-  GOCACHE="$GO_CACHE" GOMODCACHE="$GO_MOD_CACHE" go run -buildvcs=false ./cmd/weazlcode-setup
-)
-
 if [[ "${WEAZLCODE_SKIP_LAUNCH:-}" == "1" ]]; then
-  echo "Skipping first launch because WEAZLCODE_SKIP_LAUNCH=1"
+ echo "Skipping first launch because WEAZLCODE_SKIP_LAUNCH=1"
 else
   echo ""
   echo "Launching $APP_NAME..."

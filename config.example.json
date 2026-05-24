@@ -1,69 +1,26 @@
 {
-  "active_provider": "local-vllm",
-  "providers": {
-    "local-vllm": {
-      "type": "vllm",
-      "server_url": "http://localhost:8000",
-      "model": "local-model",
-      "context_window": 32768
-    },
-    "local-ollama": {
-      "type": "ollama",
-      "server_url": "http://localhost:11434",
-      "model": "llama3.1",
-      "context_window": 32768
-    },
-    "frontier-orchestrator": {
-      "type": "vllm",
-      "server_url": "https://api.example.com",
-      "model": "frontier-planner",
-      "api_key": "YOUR_FRONTIER_API_KEY_HERE",
-      "context_window": 128000
-    },
-    "frontier-reviewer": {
-      "type": "vllm",
-      "server_url": "https://api.example.com",
-      "model": "frontier-reviewer",
-      "api_key": "YOUR_FRONTIER_API_KEY_HERE",
-      "context_window": 128000
-    }
+  "planner": {
+    "provider": "vllm",
+    "model": "cyankiwi/granite-4.1-8b-AWQ-INT4",
+    "base_url": "https://granite.prendie.io",
+    "api_key_env": ""
   },
-  "model_roles": {
-    "orchestrator": "frontier-orchestrator",
-    "worker": "local-ollama",
-    "reviewer": "frontier-reviewer",
-    "summarizer": "local-ollama"
+  "worker": {
+    "provider": "vllm",
+    "model": "cyankiwi/granite-4.1-8b-AWQ-INT4",
+    "base_url": "https://granite.prendie.io",
+    "api_key_env": ""
   },
-  "database": {
-    "path": "/home/user/.local/share/weazlcode/weazlcode.sqlite3"
+  "reviewer": {
+    "provider": "vllm",
+    "model": "cyankiwi/granite-4.1-8b-AWQ-INT4",
+    "base_url": "https://granite.prendie.io",
+    "api_key_env": ""
   },
-  "ui": {
-    "resume_last_session": true,
-    "render_markdown": true,
-    "markdown_style": "dark"
-  },
-  "tools": {
-    "enabled": true,
-    "auto_execute_safe": true,
-    "alpha_vantage_api_key": "YOUR_ALPHA_VANTAGE_API_KEY_HERE",
-    "brave_api_key": "YOUR_BRAVE_API_KEY_HERE",
-    "workspace_roots": [
-      "/home/user/Code",
-      "/home/user/Notes"
-    ],
-    "max_output_chars": 12000,
-    "max_file_bytes": 1048576
-  },
-  "skills": {
-    "enabled": true,
-    "paths": [
-      ".weazlcode/skills",
-      ".agents/skills",
-      "/home/user/.codex/skills",
-      "/home/user/.weazlcode/skills"
-    ]
-  },
-  "workers": {
-    "concurrency": 2
+  "limits": {
+    "worker_concurrency": 6,
+    "model_timeout_seconds": 90,
+    "run_soft_limit_minutes": 5,
+    "repair_attempts": 2
   }
 }

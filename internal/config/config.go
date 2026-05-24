@@ -2,426 +2,201 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 )
 
-const appName = "weazlcode"
-
+// Config represents the application configuration.
 type Config struct {
-	ActiveProvider string              `json:"active_provider"`
-	Providers      map[string]Provider `json:"providers"`
-	ModelRoles     ModelRoles          `json:"model_roles"`
-	Database       Database            `json:"database"`
-	UI             UI                  `json:"ui"`
-	Tools          Tools               `json:"tools"`
-	Skills         Skills              `json:"skills"`
-	Workers        Workers             `json:"workers"`
-	Hooks          Hooks               `json:"hooks"`
-	Notifications  Notifications       `json:"notifications"`
-	Editor         Editor              `json:"editor"`
-	Debug          Debug               `json:"debug"`
+	Planner  ProviderConfig `json:"planner"`
+	Worker   ProviderConfig `json:"worker"`
+	Reviewer ProviderConfig `json:"reviewer"`
+	Limits   LimitsConfig   `json:"limits"`
 }
 
-type ModelRoles struct {
-	Orchestrator string `json:"orchestrator,omitempty"`
-	Worker       string `json:"worker,omitempty"`
-	Reviewer     string `json:"reviewer,omitempty"`
-	Summarizer   string `json:"summarizer,omitempty"`
+// ProviderConfig represents configuration for a model provider.
+type ProviderConfig struct {
+	Provider  string `json:"provider"` // anthropic, openai, vllm, ollama
+	Model     string `json:"model"`
+	BaseURL   string `json:"base_url,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+	APIKey    string `json:"api_key,omitempty"`
 }
 
-type Provider struct {
-	Type          string `json:"type"`
-	ServerURL     string `json:"server_url"`
-	Model         string `json:"model"`
-	APIKey        string `json:"api_key,omitempty"`
-	ContextWindow int    `json:"context_window,omitempty"`
+// LimitsConfig represents execution limits and constraints.
+type LimitsConfig struct {
+	WorkerConcurrency   int `json:"worker_concurrency"`
+	ModelTimeoutSeconds int `json:"model_timeout_seconds"`
+	RunSoftLimitMinutes int `json:"run_soft_limit_minutes"`
+	RepairAttempts      int `json:"repair_attempts"`
 }
 
-type Database struct {
-	Path string `json:"path"`
-}
-
-type UI struct {
-	ResumeLastSession bool   `json:"resume_last_session"`
-	RenderMarkdown    *bool  `json:"render_markdown,omitempty"`
-	MarkdownStyle     string `json:"markdown_style,omitempty"`
-}
-
-type Tools struct {
-	Enabled         bool     `json:"enabled"`
-	AutoExecute     bool     `json:"auto_execute_safe"`
-	AlphaVantageKey string   `json:"alpha_vantage_api_key,omitempty"`
-	BraveAPIKey     string   `json:"brave_api_key,omitempty"`
-	WorkspaceRoots  []string `json:"workspace_roots,omitempty"`
-	MaxOutputChars  int      `json:"max_output_chars,omitempty"`
-	MaxFileBytes    int64    `json:"max_file_bytes,omitempty"`
-}
-
-type Skills struct {
-	Enabled *bool    `json:"enabled,omitempty"`
-	Paths   []string `json:"paths,omitempty"`
-}
-
-type Workers struct {
-	Concurrency           int `json:"concurrency"`
-	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty"`
-	OutputTokens          int `json:"output_tokens,omitempty"`
-	ArtifactOutputTokens  int `json:"artifact_output_tokens,omitempty"`
-	RunTimeoutSeconds     int `json:"run_timeout_seconds,omitempty"`
-}
-
-type Hooks struct {
-	Enabled        bool                     `json:"enabled"`
-	TimeoutSeconds int                      `json:"timeout_seconds,omitempty"`
-	Events         map[string][]HookCommand `json:"events,omitempty"`
-}
-
-type HookCommand struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-}
-
-type Notifications struct {
-	Enabled bool     `json:"enabled"`
-	Bell    *bool    `json:"bell,omitempty"`
-	Events  []string `json:"events,omitempty"`
-}
-
-type Editor struct {
-	Command string   `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Wait    bool     `json:"wait,omitempty"`
-}
-
-type Debug struct {
-	Adapters       map[string]DebugAdapter `json:"adapters,omitempty"`
-	Configurations []DebugConfiguration    `json:"configurations,omitempty"`
-	TimeoutSeconds int                     `json:"timeout_seconds,omitempty"`
-}
-
-type DebugAdapter struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-}
-
-type DebugConfiguration struct {
-	Name    string   `json:"name"`
-	Type    string   `json:"type"`
-	Request string   `json:"request,omitempty"`
-	Program string   `json:"program,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Cwd     string   `json:"cwd,omitempty"`
-}
-
-func Load() (Config, string, error) {
-	path := configPath()
-	cfg, err := LoadPath(path)
-	return cfg, path, err
-}
-
-func LoadPath(path string) (Config, error) {
-	cfg := Default()
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return cfg, err
+// DefaultConfig returns a config with sensible defaults.
+func DefaultConfig() *Config {
+	return &Config{
+		Planner: ProviderConfig{
+			Provider: "vllm",
+			Model:    "cyankiwi/granite-4.1-8b-AWQ-INT4",
+			BaseURL:  "https://granite.prendie.io",
+		},
+		Worker: ProviderConfig{
+			Provider: "vllm",
+			Model:    "cyankiwi/granite-4.1-8b-AWQ-INT4",
+			BaseURL:  "https://granite.prendie.io",
+		},
+		Reviewer: ProviderConfig{
+			Provider: "vllm",
+			Model:    "cyankiwi/granite-4.1-8b-AWQ-INT4",
+			BaseURL:  "https://granite.prendie.io",
+		},
+		Limits: LimitsConfig{
+			WorkerConcurrency:   6,
+			ModelTimeoutSeconds: 90,
+			RunSoftLimitMinutes: 5,
+			RepairAttempts:      2,
+		},
 	}
-	if err := os.MkdirAll(filepath.Dir(cfg.Database.Path), 0o700); err != nil {
-		return cfg, err
-	}
+}
 
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return cfg, Save(path, cfg)
-	}
+// Load loads configuration from the default location or creates a default config.
+func Load() (*Config, string, error) {
+	configPath, err := DefaultConfigPath()
 	if err != nil {
-		return cfg, err
+		return nil, "", fmt.Errorf("get config path: %w", err)
 	}
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return cfg, err
-	}
-	cfg.withDefaults()
-	return cfg, nil
-}
 
-func Save(path string, cfg Config) error {
-	cfg.withDefaults()
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		cfg := DefaultConfig()
+		if err := Save(cfg, configPath); err != nil {
+			return nil, "", fmt.Errorf("save default config: %w", err)
+		}
+		return cfg, configPath, nil
+	}
+
+	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return err
+		return nil, "", fmt.Errorf("read config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
-}
 
-func Default() Config {
-	dataDir := dataDir()
-	return Config{
-		ActiveProvider: "local-vllm",
-		Providers: map[string]Provider{
-			"local-vllm": {
-				Type:          "vllm",
-				ServerURL:     "http://localhost:8000",
-				Model:         "local-model",
-				ContextWindow: 32768,
-			},
-			"local-ollama": {
-				Type:          "ollama",
-				ServerURL:     "http://localhost:11434",
-				Model:         "llama3.1",
-				ContextWindow: 32768,
-			},
-		},
-		Database: Database{Path: filepath.Join(dataDir, "weazlcode.sqlite3")},
-		ModelRoles: ModelRoles{
-			Orchestrator: "local-vllm",
-			Worker:       "local-ollama",
-			Reviewer:     "local-vllm",
-			Summarizer:   "local-ollama",
-		},
-		UI: UI{
-			ResumeLastSession: true,
-			RenderMarkdown:    boolPtr(true),
-			MarkdownStyle:     "dark",
-		},
-		Tools: Tools{
-			Enabled:        false,
-			AutoExecute:    true,
-			MaxOutputChars: 12000,
-			MaxFileBytes:   1024 * 1024,
-		},
-		Skills: Skills{
-			Enabled: boolPtr(true),
-			Paths:   defaultSkillPaths(),
-		},
-		Workers: Workers{
-			Concurrency:           2,
-			RequestTimeoutSeconds: 300,
-			OutputTokens:          4096,
-			ArtifactOutputTokens:  24576,
-			RunTimeoutSeconds:     900,
-		},
-		Hooks: Hooks{
-			Enabled:        false,
-			TimeoutSeconds: 10,
-			Events:         map[string][]HookCommand{},
-		},
-		Notifications: Notifications{
-			Enabled: false,
-			Bell:    boolPtr(true),
-			Events:  defaultNotificationEvents(),
-		},
-		Editor: Editor{},
-		Debug: Debug{
-			Adapters:       map[string]DebugAdapter{},
-			Configurations: []DebugConfiguration{},
-			TimeoutSeconds: 30,
-		},
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, "", fmt.Errorf("parse config: %w", err)
 	}
-}
 
-func (c *Config) Active() Provider {
-	if c.Providers == nil {
-		c.Providers = map[string]Provider{}
-	}
-	p, ok := c.Providers[c.ActiveProvider]
-	if !ok {
-		return Provider{}
-	}
-	return p
-}
-
-func (c *Config) withDefaults() {
-	def := Default()
-	if c.ActiveProvider == "" {
-		c.ActiveProvider = def.ActiveProvider
-	}
-	if c.Providers == nil || len(c.Providers) == 0 {
-		c.Providers = def.Providers
-	}
-	if c.ModelRoles.Orchestrator == "" {
-		c.ModelRoles.Orchestrator = c.ActiveProvider
-	}
-	if c.ModelRoles.Worker == "" {
-		c.ModelRoles.Worker = c.ActiveProvider
-	}
-	if c.ModelRoles.Reviewer == "" {
-		c.ModelRoles.Reviewer = c.ModelRoles.Orchestrator
-	}
-	if c.ModelRoles.Summarizer == "" {
-		c.ModelRoles.Summarizer = c.ModelRoles.Worker
-	}
-	for name, provider := range c.Providers {
-		if provider.ContextWindow <= 0 {
-			provider.ContextWindow = 32768
-			c.Providers[name] = provider
+	if applyDefaults(&cfg) {
+		if err := Save(&cfg, configPath); err != nil {
+			return nil, configPath, fmt.Errorf("save migrated config: %w", err)
 		}
 	}
-	if c.Database.Path == "" {
-		c.Database.Path = def.Database.Path
-	}
-	if c.UI.RenderMarkdown == nil {
-		c.UI.RenderMarkdown = def.UI.RenderMarkdown
-	}
-	if c.UI.MarkdownStyle == "" {
-		c.UI.MarkdownStyle = def.UI.MarkdownStyle
-	}
-	if c.Tools.MaxOutputChars <= 0 {
-		c.Tools.MaxOutputChars = def.Tools.MaxOutputChars
-	}
-	if c.Tools.MaxFileBytes <= 0 {
-		c.Tools.MaxFileBytes = def.Tools.MaxFileBytes
-	}
-	if len(c.Skills.Paths) == 0 {
-		c.Skills.Paths = def.Skills.Paths
-	}
-	if c.Skills.Enabled == nil {
-		c.Skills.Enabled = def.Skills.Enabled
-	}
-	if c.Workers.Concurrency <= 0 {
-		c.Workers.Concurrency = RecommendedWorkerConcurrency(c.ProviderForRole("worker").Type)
-	}
-	if c.Workers.RequestTimeoutSeconds <= 0 {
-		c.Workers.RequestTimeoutSeconds = def.Workers.RequestTimeoutSeconds
-	}
-	if c.Workers.OutputTokens <= 0 {
-		c.Workers.OutputTokens = def.Workers.OutputTokens
-	}
-	if c.Workers.ArtifactOutputTokens <= 0 {
-		c.Workers.ArtifactOutputTokens = def.Workers.ArtifactOutputTokens
-	}
-	if c.Workers.RunTimeoutSeconds <= 0 {
-		c.Workers.RunTimeoutSeconds = def.Workers.RunTimeoutSeconds
-	}
-	if c.Hooks.TimeoutSeconds <= 0 {
-		c.Hooks.TimeoutSeconds = def.Hooks.TimeoutSeconds
-	}
-	if c.Hooks.Events == nil {
-		c.Hooks.Events = map[string][]HookCommand{}
-	}
-	if c.Notifications.Bell == nil {
-		c.Notifications.Bell = def.Notifications.Bell
-	}
-	if len(c.Notifications.Events) == 0 {
-		c.Notifications.Events = def.Notifications.Events
-	}
-	if c.Debug.Adapters == nil {
-		c.Debug.Adapters = map[string]DebugAdapter{}
-	}
-	if c.Debug.Configurations == nil {
-		c.Debug.Configurations = []DebugConfiguration{}
-	}
-	if c.Debug.TimeoutSeconds <= 0 {
-		c.Debug.TimeoutSeconds = def.Debug.TimeoutSeconds
-	}
+
+	return &cfg, configPath, nil
 }
 
-func RecommendedWorkerConcurrency(providerType string) int {
-	switch strings.ToLower(strings.TrimSpace(providerType)) {
-	case "vllm":
-		return 8
-	default:
-		return 2
+func applyDefaults(cfg *Config) bool {
+	changed := false
+	defaults := DefaultConfig()
+	if cfg.Planner.Provider == "" && cfg.Planner.Model == "" {
+		cfg.Planner = defaults.Planner
+		changed = true
 	}
-}
-
-func (c *Config) ProviderForRole(role string) Provider {
-	name := c.ActiveProvider
-	switch role {
-	case "orchestrator":
-		name = c.ModelRoles.Orchestrator
-	case "worker":
-		name = c.ModelRoles.Worker
-	case "reviewer":
-		name = c.ModelRoles.Reviewer
-	case "summarizer":
-		name = c.ModelRoles.Summarizer
+	if cfg.Worker.Provider == "" && cfg.Worker.Model == "" {
+		cfg.Worker = defaults.Worker
+		changed = true
 	}
-	if p, ok := c.Providers[name]; ok {
-		return p
+	if cfg.Reviewer.Provider == "" && cfg.Reviewer.Model == "" {
+		cfg.Reviewer = defaults.Reviewer
+		changed = true
 	}
-	return c.Active()
+	if cfg.Limits.WorkerConcurrency == 0 {
+		cfg.Limits.WorkerConcurrency = defaults.Limits.WorkerConcurrency
+		changed = true
+	}
+	if cfg.Limits.ModelTimeoutSeconds == 0 {
+		cfg.Limits.ModelTimeoutSeconds = defaults.Limits.ModelTimeoutSeconds
+		changed = true
+	}
+	if cfg.Limits.RunSoftLimitMinutes == 0 {
+		cfg.Limits.RunSoftLimitMinutes = defaults.Limits.RunSoftLimitMinutes
+		changed = true
+	}
+	if cfg.Limits.RepairAttempts == 0 {
+		cfg.Limits.RepairAttempts = defaults.Limits.RepairAttempts
+		changed = true
+	}
+	return changed
 }
 
-func (ui UI) MarkdownEnabled() bool {
-	return ui.RenderMarkdown == nil || *ui.RenderMarkdown
+// Save writes the configuration to the specified path.
+func Save(cfg *Config, path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+
+	return nil
 }
 
-func (s Skills) SkillsEnabled() bool {
-	return s.Enabled == nil || *s.Enabled
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
-func defaultNotificationEvents() []string {
-	return []string{"task_done", "task_blocked", "repair_requested", "worker_blocker"}
-}
-
-func defaultSkillPaths() []string {
+// DefaultConfigPath returns the default configuration file path.
+func DefaultConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
-	if runtime.GOOS == "windows" {
-		appData := windowsAppDataRoot()
-		paths := []string{filepath.Join(appData, "skills")}
-		if err == nil && home != "" {
-			paths = append(paths, filepath.Join(home, ".codex", "skills"))
+	if err != nil {
+		return "", fmt.Errorf("get home dir: %w", err)
+	}
+	return filepath.Join(home, ".config", "weazlcode", "config.json"), nil
+}
+
+// GetAPIKey retrieves an API key from the environment variable specified in the config.
+func (p *ProviderConfig) GetAPIKey() string {
+	if p.APIKeyEnv != "" {
+		if key := os.Getenv(p.APIKeyEnv); key != "" {
+			return key
 		}
-		return paths
 	}
-	if err != nil || home == "" {
-		return []string{".weazlcode/skills", ".agents/skills"}
-	}
-	return []string{
-		".weazlcode/skills",
-		".agents/skills",
-		filepath.Join(home, ".codex", "skills"),
-		filepath.Join(home, ".weazlcode", "skills"),
-	}
+	return p.APIKey
 }
 
-func configPath() string {
-	if p := os.Getenv("WEAZLCODE_CONFIG"); p != "" {
-		return p
+// IsConfigured returns true if the provider has required configuration.
+func (p *ProviderConfig) IsConfigured() bool {
+	if p.Provider == "" || p.Model == "" {
+		return false
 	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(windowsAppDataRoot(), "config", "config.json")
+	// For local providers (vllm, ollama), base_url is required
+	if p.Provider == "vllm" || p.Provider == "ollama" {
+		return p.BaseURL != ""
 	}
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		return filepath.Join(xdg, appName, "config.json")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", appName, "config.json")
+	// For cloud providers, an env var or local-only config key is required.
+	return p.APIKeyEnv != "" || p.APIKey != ""
 }
 
-func dataDir() string {
-	if p := os.Getenv("WEAZLCODE_DATA"); p != "" {
-		return p
+// Validate checks if the configuration is valid.
+func (c *Config) Validate() error {
+	if !c.Planner.IsConfigured() {
+		return fmt.Errorf("planner provider not configured")
 	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(windowsAppDataRoot(), "vaults")
+	if !c.Worker.IsConfigured() {
+		return fmt.Errorf("worker provider not configured")
 	}
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, appName)
+	if !c.Reviewer.IsConfigured() {
+		return fmt.Errorf("reviewer provider not configured")
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", appName)
-}
-
-func windowsAppDataRoot() string {
-	if p := os.Getenv("WEAZLCODE_HOME"); p != "" {
-		return p
+	if c.Limits.WorkerConcurrency < 1 {
+		return fmt.Errorf("worker_concurrency must be at least 1")
 	}
-	if p := os.Getenv("APPDATA"); p != "" {
-		return filepath.Join(p, appName)
+	if c.Limits.ModelTimeoutSeconds < 1 {
+		return fmt.Errorf("model_timeout_seconds must be at least 1")
 	}
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		return filepath.Join(dir, appName)
+	if c.Limits.RepairAttempts < 0 {
+		return fmt.Errorf("repair_attempts must be non-negative")
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "AppData", "Roaming", appName)
+	return nil
 }
